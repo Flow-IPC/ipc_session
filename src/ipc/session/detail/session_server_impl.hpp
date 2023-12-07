@@ -113,7 +113,7 @@ namespace ipc::session
  * join itself.  So:
  *   - We maintain State::m_incomplete_sessions storing each such outstanding S.  If dtor runs, then all S will be
  *     auto-destroyed which will automatically invoke the user handler with operation-aborted.
- *   - If an incomplete (oustanding) S successfully completes log-in, we remove it from 
+ *   - If an incomplete (oustanding) S successfully completes log-in, we remove it from
  *     Session_server_impl::m_incomplete_sessions and emit it to user via handler.
  *   - If it completes log-in with failure, we remove it from State::m_incomplete_sessions and then:
  *     - hand it off to a mostly-idle separate thread, State::m_incomplete_session_graveyard, which can run S's dtor
