@@ -248,7 +248,7 @@ protected:
    * could still claim to be non-blocking.  It's a matter of perspective really.  This value just seems to
    * cause less confusion.  We might reconsider the whole thing however.
    */
-  static constexpr util::Fine_duration S_OPEN_CHANNEL_TIMEOUT = boost::chrono::seconds(5);
+  static constexpr util::Fine_duration S_OPEN_CHANNEL_TIMEOUT = boost::chrono::seconds(60);
 
   /**
    * The max sendable MQ message size as decided by Server_session_impl::make_channel_mqs() (and imposed on both sides,
