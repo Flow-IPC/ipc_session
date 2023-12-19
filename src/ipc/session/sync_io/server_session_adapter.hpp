@@ -72,7 +72,7 @@ namespace ipc::session::sync_io
  * ...by reading an equally applicable note in Client_session_adapter doc header.
  *
  * @tparam Session
- *         The async-I/O `Client_session` concrete type being adapted.  As of this writing that would be one of
+ *         The async-I/O `Server_session` concrete type being adapted.  As of this writing that would be one of
  *         at least: `session::Server_session<knobs>`, `session::shm::classic::Server_session<knobs>`,
  *         `session::shm::jemalloc::Server_session<knobs>`.  We would recommend the technique shown in the
  *         above doc header involving Session_server_adapter::Session_obj.  This will enable nice code reuse and
@@ -182,7 +182,8 @@ bool Server_session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func
 
 template<typename Session>
 template<typename Create_ev_wait_hndl_func>
-bool Server_session_adapter<Session>::replace_event_wait_handles(const Create_ev_wait_hndl_func& create_ev_wait_hndl_func)
+bool Server_session_adapter<Session>::replace_event_wait_handles
+       (const Create_ev_wait_hndl_func& create_ev_wait_hndl_func)
 {
   return Base::replace_event_wait_handles(create_ev_wait_hndl_func);
 }
