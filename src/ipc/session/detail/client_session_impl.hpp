@@ -348,6 +348,25 @@ protected:
    */
   const Master_structured_channel& master_channel_const() const;
 
+  /**
+   * Synchronously stops async_worker() loop, the post-condition being that thread W has been joined; no tasks
+   * `post()`ed onto it by `*this` or subclass shall execute after this returns.
+   *   - If `*this` is not being subclassed, or if it never posts onto async_worker(): Our own dtor shall call
+   *     this first-thing; no need for subclass to worry.
+   *   - If `*this` is being subclassed, and it does post onto async_worker(): The terminal subclass's dtor must
+   *     call this ~first-thing (our own dtor, once it is soon called, shall know not to re-execute the same thing).
+   *
+   * Call at most once; otherwise undefined behavior (assertion may trip).
+   *
+   * This exists to avoid a race, however unlikely, between a subclass's asynchronous accept-log-in code posted
+   * onto thread W, and that same class's dtor being invoked by the user in thread U.  There is a short time period,
+   * when thread W (#m_async_worker) is active -- `*this` is still intact -- but the subclass's members are being
+   * destroyed by its dtor.  In that case dtor_async_worker_stop() would be called by the subclass dtor to put an
+   * end to async shenanigans in thread W, so it cano continue destroying self in peace.  When there is no subclass,
+   * our own dtor does so.
+   */
+  void dtor_async_worker_stop();
+
 private:
   // Types.
 
@@ -756,14 +775,14 @@ CLASS_CLI_SESSION_IMPL::Client_session_impl(flow::log::Logger* logger_ptr,
 }
 
 TEMPLATE_CLI_SESSION_IMPL
-CLASS_CLI_SESSION_IMPL::~Client_session_impl()
+void CLASS_CLI_SESSION_IMPL::dtor_async_worker_stop()
 {
-  using flow::async::Single_thread_task_loop;
   using flow::async::Synchronicity;
-  using flow::util::ostream_op_string;
   using boost::promise;
 
-  // We are in thread U.  By contract in doc header, they must not call us from a completion handler (thread W).
+  // We are in thread U (from either our own dtor or subclass dtor).
+
+  assert((!m_async_worker.task_engine()->stopped()) && "This shall be called at most once.");
 
   FLOW_LOG_INFO("Client session [" << *this << "]: Shutting down.  Worker thread will be joined, but first "
                 "we perform session master channel end-sending op (flush outgoing data) until completion.  "
@@ -774,7 +793,7 @@ CLASS_CLI_SESSION_IMPL::~Client_session_impl()
    * it is in practice probably.  A sync_ call(), regardless of that, would just be convenient resulting in less
    * code here. */
 
-  /* Let's do the `async_end_sending() thing we just promised.
+  /* Let's do the async_end_sending() thing we just promised.
    *
    * So far everything is still operating; so we need to follow normal rules.  m_master_channel access requires
    * being in thread W. */
@@ -792,7 +811,7 @@ CLASS_CLI_SESSION_IMPL::~Client_session_impl()
     m_master_channel->async_end_sending([&](const Error_code&)
     {
       // We are in thread Wc (unspecified, really struc::Channel async callback thread).
-      FLOW_LOG_TRACE("Client session [" << *this << "]: Dtor: master channel outgoing-direction flush finished.");
+      FLOW_LOG_TRACE("Client session [" << *this << "]: Shutdown: master channel outgoing-direction flush finished.");
       done_promise.set_value();
     });
     // Back here in thread W:
@@ -805,6 +824,22 @@ CLASS_CLI_SESSION_IMPL::~Client_session_impl()
    * (3) joins thread W (waits for it to exit); (4) returns.  That's a lot, but it's non-blocking. */
   m_async_worker.stop();
   // Thread W is (synchronously!) no more.  We can now access whatever m_ state we want without concurrency concerns.
+} // Client_session_impl::dtor_async_worker_stop()
+
+TEMPLATE_CLI_SESSION_IMPL
+CLASS_CLI_SESSION_IMPL::~Client_session_impl()
+{
+  using flow::async::Single_thread_task_loop;
+  using flow::async::Synchronicity;
+  using flow::util::ostream_op_string;
+  using boost::promise;
+
+  // We are in thread U.  By contract in doc header, they must not call us from a completion handler (thread W).
+
+  if (!m_async_worker.task_engine()->stopped())
+  {
+    dtor_async_worker_stop();
+  }
 
   /* Like it says, as we promised in doc header(s), the destruction of *this shall cause any registered completion
    * handlers (namely async-connect one) to be called from some unspecified thread(s) that aren't thread U, and once

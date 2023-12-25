@@ -411,10 +411,16 @@ protected:
   Master_structured_channel* master_channel();
 
   /**
-   * Analogous to Client_session_impl::master_channel_const.  See that doc header.
+   * Analogous to Client_session_impl::master_channel_const().  See that doc header.
    * @return See above.
    */
   const Master_structured_channel& master_channel_const() const;
+
+  /**
+   * Analogous to Client_session_impl::dtor_async_worker_stop().  See that doc header.
+   * @return See above.
+   */
+  void dtor_async_worker_stop();
 
 private:
   // Types.
@@ -657,19 +663,17 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
 } // Server_session_impl::Server_session_impl()
 
 TEMPLATE_SRV_SESSION_IMPL
-CLASS_SRV_SESSION_IMPL::~Server_session_impl()
+void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
 {
-  using flow::async::Single_thread_task_loop;
   using flow::async::Synchronicity;
-  using flow::util::ostream_op_string;
   using boost::promise;
 
-  // We are in thread U.  By contract in doc header, they must not call us from a completion handler (thread W).
+  // We are in thread U (from either our own dtor or subclass dtor).
 
-  /* The following is quite similar to ~Client_session(), so keeping comments light here (@todo code reuse?).
-   * This is simpler after the .stop() though; async_accept_log_in() is *not* a public API; so things like calling it
-   * more than 1x, let alone while an async-accept-log-in is in progress, are simply not allowed and treated as
-   * undefined behavior.  Hence there's no m_mutex/m_state about which to worry. */
+  assert((!m_async_worker.task_engine()->stopped()) && "This shall be called at most once.");
+
+  /* The following is quite similar to Client_session_impl::dtor_async_worker_stop(), so keeping comments
+   * light here (@todo code reuse?). */
 
   FLOW_LOG_INFO("Server session [" << *this << "]: Shutting down.  Worker thread will be joined, but first "
                 "we perform session master channel end-sending op (flush outgoing data) until completion.  "
@@ -689,7 +693,7 @@ CLASS_SRV_SESSION_IMPL::~Server_session_impl()
     m_master_channel->async_end_sending([&](const Error_code&)
     {
       // We are in thread Wc (unspecified, really struc::Channel async callback thread).
-      FLOW_LOG_TRACE("Server session [" << *this << "]: Dtor: master channel outgoing-direction flush finished.");
+      FLOW_LOG_TRACE("Server session [" << *this << "]: Shutdown: master channel outgoing-direction flush finished.");
       done_promise.set_value();
     }); // Don't care if returned false and did nothing: cool then; did our best.
     // Back here in thread W:
@@ -698,6 +702,26 @@ CLASS_SRV_SESSION_IMPL::~Server_session_impl()
   // Back here in thread U: done; yay.
 
   m_async_worker.stop();
+  // Thread W has been joined.
+} // Server_session_impl::dtor_async_worker_stop()
+
+TEMPLATE_SRV_SESSION_IMPL
+CLASS_SRV_SESSION_IMPL::~Server_session_impl()
+{
+  using flow::async::Single_thread_task_loop;
+  using flow::util::ostream_op_string;
+
+  // We are in thread U.  By contract in doc header, they must not call us from a completion handler (thread W).
+
+  /* The following is quite similar to ~Client_session_impl(), so keeping comments light here (@todo code reuse?).
+   * This is simpler after the dtor_async_worker_stop() though; async_accept_log_in() is *not* a public API;
+   * so things like calling it more than 1x, let alone while an async-accept-log-in is in progress, are simply
+   * not allowed and treated as undefined behavior.  Hence there's no m_mutex/m_state about which to worry. */
+
+  if (!m_async_worker.task_engine()->stopped())
+  {
+    dtor_async_worker_stop();
+  }
 
   if (!m_log_in_on_done_func.empty())
   {
