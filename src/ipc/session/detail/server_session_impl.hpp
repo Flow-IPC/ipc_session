@@ -416,10 +416,7 @@ protected:
    */
   const Master_structured_channel& master_channel_const() const;
 
-  /**
-   * Analogous to Client_session_impl::dtor_async_worker_stop().  See that doc header.
-   * @return See above.
-   */
+  /// Analogous to Client_session_impl::dtor_async_worker_stop().  See that doc header.
   void dtor_async_worker_stop();
 
 private:
