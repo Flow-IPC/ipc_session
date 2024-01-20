@@ -116,6 +116,9 @@ public:
   template<typename... Ctor_args>
   Client_session_adapter(Ctor_args&&... ctor_args);
 
+  /// Destructor.
+  ~Client_session_adapter();
+
   // Methods.
 
   /**
@@ -270,6 +273,12 @@ Client_session_adapter<Session>::Client_session_adapter(Ctor_args&&... ctor_args
   m_ev_wait_hndl_conn(m_ev_hndl_task_engine_unused) // This needs to be .assign()ed still.
 {
   Base::init_pipe(&m_ready_reader_conn, &m_ready_writer_conn, &m_ev_wait_hndl_conn);
+}
+
+template<typename Session>
+Client_session_adapter<Session>::~Client_session_adapter()
+{
+  Base::dtor_stop(); // Stop the Client_session, and its thread W, as various this->m_* items are about to disappear.
 }
 
 template<typename Session>
