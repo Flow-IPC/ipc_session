@@ -47,16 +47,13 @@ namespace ipc::session::sync_io
  *         See, e.g., Client_session_adapter.
  */
 template<typename Session>
-class Session_adapter :
-  public Session
+class Session_adapter
 {
 public:
   // Types.
 
   /// See, e.g., Client_session_adapter.
   using Session_obj = Session;
-  /// Our main base.
-  using Base = Session_obj;
 
   /// See, e.g., Client_session_adapter.
   using Sync_io_obj = transport::Null_peer;
@@ -186,9 +183,17 @@ public:
   template<typename Task_err>
   bool init_handlers(Task_err&& on_err_func_arg);
 
-  // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
-  using Base::get_logger;
-  using Base::get_log_component;
+  /**
+   * See `flow::log::Log_context`.
+   * @return See above.
+   */
+  flow::log::Logger* get_logger() const;
+
+  /**
+   * See `flow::log::Log_context`.
+   * @return See above.
+   */
+  const flow::log::Component& get_log_component() const;
 
 protected:
   // Methods.
@@ -220,6 +225,12 @@ protected:
    */
   void init_pipe(util::Pipe_reader* reader, util::Pipe_writer* writer,
                  util::sync_io::Asio_waitable_native_handle* ev_wait_hndl);
+
+  /**
+   * The adapted mutable #Session_obj.
+   * @return See above.
+   */
+  Session_obj* core();
 
 private:
   // Types.
@@ -377,7 +388,7 @@ private:
    *     from another thread -- without the user explicitly beginning the async-op (it sort of begins by itself) --
    *     it can also only happen at most once per `*this` (modulo move-assignment).
    *
-   * At any rate: the handler we register with `(Session_obj*)this` -- on_channel_func_sio() -- can be invoked
+   * At any rate: the handler we register with #m_async_io -- on_channel_func_sio() -- can be invoked
    * from a background thread at any time.  This triggers signaling #m_ready_reader_chan (via #m_ready_writer_chan),
    * on which there is always a `sync_io`-pattern async-wait outstanding.  We are informed of a completed
    * async-wait (byte is available on #m_ready_reader_chan); we consume the byte and pop and pass the result
@@ -390,6 +401,9 @@ private:
 
   /// Protects #m_target_channel_open_q, accessed from user async-wait-reporter thread; and #Session_obj worker thread.
   mutable flow::util::Mutex_non_recursive m_target_channel_open_q_mutex;
+
+  /// This guy does all the work.  In our dtor this will be destroyed (hence thread stopped) first-thing.
+  Async_io_obj m_async_io;
 }; // class Session_adapter
 
 // Template implementations.
@@ -413,9 +427,6 @@ Session_adapter<Session>::Session_adapter(flow::log::Logger* logger_ptr,
                                           const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                                           Task_err&& on_err_func,
                                           On_passive_open_channel_handler&& on_passive_open_channel_func) :
-  Base(logger_ptr, cli_app_ref, srv_app_ref,
-       on_err_func_sio(), on_channel_func_sio()),
-
   m_ready_reader_err(m_nb_task_engine), // No handle inside but will be set-up soon below.
   m_ready_writer_err(m_nb_task_engine), // Ditto.
   m_ev_wait_hndl_err(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
@@ -423,7 +434,9 @@ Session_adapter<Session>::Session_adapter(flow::log::Logger* logger_ptr,
   m_ready_writer_chan(m_nb_task_engine),
   m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused),
   m_on_err_func(std::move(on_err_func)),
-  m_on_channel_func_or_empty(std::move(on_passive_open_channel_func))
+  m_on_channel_func_or_empty(std::move(on_passive_open_channel_func)),
+  m_async_io(logger_ptr, cli_app_ref, srv_app_ref,
+             on_err_func_sio(), on_channel_func_sio())
 {
   init_pipe(&m_ready_reader_err, &m_ready_writer_err, &m_ev_wait_hndl_err);
   init_pipe(&m_ready_reader_chan, &m_ready_writer_chan, &m_ev_wait_hndl_chan);
@@ -434,15 +447,14 @@ template<typename Task_err>
 Session_adapter<Session>::Session_adapter(flow::log::Logger* logger_ptr,
                                           const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                                           Task_err&& on_err_func) :
-  Base(logger_ptr, cli_app_ref, srv_app_ref, on_err_func_sio()),
-
   m_ready_reader_err(m_nb_task_engine), // No handle inside but will be set-up soon below.
   m_ready_writer_err(m_nb_task_engine), // Ditto.
   m_ev_wait_hndl_err(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
   m_ready_reader_chan(m_nb_task_engine),
   m_ready_writer_chan(m_nb_task_engine),
   m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused),
-  m_on_err_func(std::move(on_err_func))
+  m_on_err_func(std::move(on_err_func)),
+  m_async_io(logger_ptr, cli_app_ref, srv_app_ref, on_err_func_sio())
 {
   init_pipe(&m_ready_reader_err, &m_ready_writer_err, &m_ev_wait_hndl_err);
   init_pipe(&m_ready_reader_chan, &m_ready_writer_chan, &m_ev_wait_hndl_chan);
@@ -467,7 +479,7 @@ bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg,
 #ifndef NDEBUG
   const bool ok =
 #endif
-  Base::init_handlers(on_err_func_sio(), on_channel_func_sio());
+  core()->init_handlers(on_err_func_sio(), on_channel_func_sio());
 
   assert(ok && "We should have caught this with the above guard.");
   return true;
@@ -489,7 +501,7 @@ bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg)
 #ifndef NDEBUG
   const bool ok =
 #endif
-  Base::init_handlers(on_err_func_sio());
+  core()->init_handlers(on_err_func_sio());
 
   assert(ok && "We should have caught this with the above guard.");
   return true;
@@ -688,6 +700,24 @@ template<typename... Args>
 void Session_adapter<Session>::async_wait(Args&&... args)
 {
   m_ev_wait_func(std::forward<Args>(args)...);
+}
+
+template<typename Session>
+typename Session_adapter<Session>::Session_obj* Session_adapter<Session>::core()
+{
+  return &m_async_io;
+}
+
+template<typename Session>
+flow::log::Logger* Session_adapter<Session>::get_logger() const
+{
+  return core()->get_logger();
+}
+
+template<typename Session>
+const flow::log::Component& Session_adapter<Session>::get_log_component() const
+{
+  return core()->get_log_component();
 }
 
 } // namespace ipc::session::sync_io

@@ -199,7 +199,7 @@ template<typename Session>
 typename Server_session_adapter<Session>::Session_obj*
   Server_session_adapter<Session>::core()
 {
-  return static_cast<Session_obj*>(this);
+  return Base::core();
 }
 
 template<typename Session>
