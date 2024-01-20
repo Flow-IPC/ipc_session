@@ -116,6 +116,9 @@ public:
   template<typename... Ctor_args>
   Client_session_adapter(Ctor_args&&... ctor_args);
 
+  /// Destructor.
+  ~Client_session_adapter();
+
   // Methods.
 
   /**
@@ -273,6 +276,12 @@ Client_session_adapter<Session>::Client_session_adapter(Ctor_args&&... ctor_args
 }
 
 template<typename Session>
+Client_session_adapter<Session>::~Client_session_adapter()
+{
+  Base::dtor_stop(); // Stop the Client_session, and its thread W, as various this->m_* items are about to disappear.
+}
+
+template<typename Session>
 template<typename Event_wait_func_t>
 bool Client_session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
 {
@@ -318,7 +327,7 @@ bool Client_session_adapter<Session>::async_connect(Task_err&& on_done_func)
   // else
   m_on_conn_func_or_empty = std::move(on_done_func);
 
-  if (!Base::Base::async_connect([this](const Error_code& err_code) { conn_write(err_code); }))
+  if (!core()->async_connect([this](const Error_code& err_code) { conn_write(err_code); }))
   {
     m_on_conn_func_or_empty.clear(); // Undo.
     return false; // Connect while connected, or something.  It logged.
@@ -352,10 +361,10 @@ bool Client_session_adapter<Session>::async_connect
   // else
   m_on_conn_func_or_empty = std::move(on_done_func);
 
-  const bool ok = Base::Base::async_connect(mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null,
-                                            init_channels_by_srv_req,
-                                            [this](const Error_code& err_code)
-                                              { conn_write(err_code); });
+  const bool ok = core()->async_connect(mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null,
+                                        init_channels_by_srv_req,
+                                        [this](const Error_code& err_code)
+                                          { conn_write(err_code); });
   if (!ok)
   {
     m_on_conn_func_or_empty.clear(); // Undo.
@@ -405,7 +414,7 @@ template<typename Session>
 typename Client_session_adapter<Session>::Session_obj*
   Client_session_adapter<Session>::core()
 {
-  return static_cast<Session_obj*>(this);
+  return Base::core();
 }
 
 template<typename Session>

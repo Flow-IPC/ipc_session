@@ -147,8 +147,8 @@ public:
   bool init_handlers(Args&&... args);
 
   /**
-   * The adapted mutable #Session_obj.  It is safe to access any API except for `core()->async_connect()` (undefined
-   * behavior); use `this->async_connect()` instead.  Remember that start_ops() is required first.
+   * The adapted mutable #Session_obj.  It is safe to access any API except for `core()->init_handlers()` (undefined
+   * behavior); use `this->init_handlers()` instead.  Remember that start_ops() is required first.
    *
    * @return See above.
    */
@@ -199,7 +199,7 @@ template<typename Session>
 typename Server_session_adapter<Session>::Session_obj*
   Server_session_adapter<Session>::core()
 {
-  return static_cast<Session_obj*>(this);
+  return Base::core();
 }
 
 template<typename Session>

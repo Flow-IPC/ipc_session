@@ -47,16 +47,13 @@ namespace ipc::session::sync_io
  *         See, e.g., Client_session_adapter.
  */
 template<typename Session>
-class Session_adapter :
-  public Session
+class Session_adapter
 {
 public:
   // Types.
 
   /// See, e.g., Client_session_adapter.
   using Session_obj = Session;
-  /// Our main base.
-  using Base = Session_obj;
 
   /// See, e.g., Client_session_adapter.
   using Sync_io_obj = transport::Null_peer;
@@ -186,12 +183,28 @@ public:
   template<typename Task_err>
   bool init_handlers(Task_err&& on_err_func_arg);
 
-  // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
-  using Base::get_logger;
-  using Base::get_log_component;
+  /**
+   * See `flow::log::Log_context`.
+   * @return See above.
+   */
+  flow::log::Logger* get_logger() const;
+
+  /**
+   * See `flow::log::Log_context`.
+   * @return See above.
+   */
+  const flow::log::Component& get_log_component() const;
 
 protected:
   // Methods.
+
+  /**
+   * Utility to be optionally called from sub-class dtor only, this shuts down the contained #Async_io_obj
+   * which includes joining its thread.  Sub-class must call this ~first thing, if handlers it passes
+   * to contained #Async_io_obj access the sub-class's state.  Otherwise tasks might run concurrently
+   * during/after they disappear during sub-class shutdown.
+   */
+  void dtor_stop();
 
   /**
    * Forwards to the util::sync_io::Event_wait_func saved in start_ops().
@@ -220,6 +233,18 @@ protected:
    */
   void init_pipe(util::Pipe_reader* reader, util::Pipe_writer* writer,
                  util::sync_io::Asio_waitable_native_handle* ev_wait_hndl);
+
+  /**
+   * The adapted mutable #Session_obj.
+   * @return See above.
+   */
+  Session_obj* core();
+
+  /**
+   * The adapted mutable #Session_obj.
+   * @return See above.
+   */
+  const Session_obj* core() const;
 
 private:
   // Types.
@@ -377,7 +402,7 @@ private:
    *     from another thread -- without the user explicitly beginning the async-op (it sort of begins by itself) --
    *     it can also only happen at most once per `*this` (modulo move-assignment).
    *
-   * At any rate: the handler we register with `(Session_obj*)this` -- on_channel_func_sio() -- can be invoked
+   * At any rate: the handler we register with #m_async_io -- on_channel_func_sio() -- can be invoked
    * from a background thread at any time.  This triggers signaling #m_ready_reader_chan (via #m_ready_writer_chan),
    * on which there is always a `sync_io`-pattern async-wait outstanding.  We are informed of a completed
    * async-wait (byte is available on #m_ready_reader_chan); we consume the byte and pop and pass the result
@@ -390,6 +415,12 @@ private:
 
   /// Protects #m_target_channel_open_q, accessed from user async-wait-reporter thread; and #Session_obj worker thread.
   mutable flow::util::Mutex_non_recursive m_target_channel_open_q_mutex;
+
+  /**
+   * This guy does all the work.  In our dtor this will be destroyed (hence thread stopped) first-thing,
+   * unless it is `.reset()` even earlier in dtor_stop().
+   */
+  std::optional<Async_io_obj> m_async_io;
 }; // class Session_adapter
 
 // Template implementations.
@@ -401,7 +432,8 @@ Session_adapter<Session>::Session_adapter() :
   m_ev_wait_hndl_err(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
   m_ready_reader_chan(m_nb_task_engine),
   m_ready_writer_chan(m_nb_task_engine),
-  m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused)
+  m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused),
+  m_async_io(std::in_place)
 {
   init_pipe(&m_ready_reader_err, &m_ready_writer_err, &m_ev_wait_hndl_err);
   init_pipe(&m_ready_reader_chan, &m_ready_writer_chan, &m_ev_wait_hndl_chan);
@@ -413,9 +445,6 @@ Session_adapter<Session>::Session_adapter(flow::log::Logger* logger_ptr,
                                           const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                                           Task_err&& on_err_func,
                                           On_passive_open_channel_handler&& on_passive_open_channel_func) :
-  Base(logger_ptr, cli_app_ref, srv_app_ref,
-       on_err_func_sio(), on_channel_func_sio()),
-
   m_ready_reader_err(m_nb_task_engine), // No handle inside but will be set-up soon below.
   m_ready_writer_err(m_nb_task_engine), // Ditto.
   m_ev_wait_hndl_err(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
@@ -423,7 +452,10 @@ Session_adapter<Session>::Session_adapter(flow::log::Logger* logger_ptr,
   m_ready_writer_chan(m_nb_task_engine),
   m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused),
   m_on_err_func(std::move(on_err_func)),
-  m_on_channel_func_or_empty(std::move(on_passive_open_channel_func))
+  m_on_channel_func_or_empty(std::move(on_passive_open_channel_func)),
+  m_async_io(std::in_place,
+             logger_ptr, cli_app_ref, srv_app_ref,
+             on_err_func_sio(), on_channel_func_sio())
 {
   init_pipe(&m_ready_reader_err, &m_ready_writer_err, &m_ev_wait_hndl_err);
   init_pipe(&m_ready_reader_chan, &m_ready_writer_chan, &m_ev_wait_hndl_chan);
@@ -434,18 +466,24 @@ template<typename Task_err>
 Session_adapter<Session>::Session_adapter(flow::log::Logger* logger_ptr,
                                           const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                                           Task_err&& on_err_func) :
-  Base(logger_ptr, cli_app_ref, srv_app_ref, on_err_func_sio()),
-
   m_ready_reader_err(m_nb_task_engine), // No handle inside but will be set-up soon below.
   m_ready_writer_err(m_nb_task_engine), // Ditto.
   m_ev_wait_hndl_err(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
   m_ready_reader_chan(m_nb_task_engine),
   m_ready_writer_chan(m_nb_task_engine),
   m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused),
-  m_on_err_func(std::move(on_err_func))
+  m_on_err_func(std::move(on_err_func)),
+  m_async_io(std::in_place,
+             logger_ptr, cli_app_ref, srv_app_ref, on_err_func_sio())
 {
   init_pipe(&m_ready_reader_err, &m_ready_writer_err, &m_ev_wait_hndl_err);
   init_pipe(&m_ready_reader_chan, &m_ready_writer_chan, &m_ev_wait_hndl_chan);
+}
+
+template<typename Session>
+void Session_adapter<Session>::dtor_stop()
+{
+  m_async_io.reset();
 }
 
 template<typename Session>
@@ -455,7 +493,7 @@ bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg,
 {
   if (!m_on_err_func.empty())
   {
-    FLOW_LOG_WARNING("Session_adapter [" << *this << "]: init_handlers() called duplicately.  Ignoring.");
+    FLOW_LOG_WARNING("Session_adapter [" << *m_async_io << "]: init_handlers() called duplicately.  Ignoring.");
     return false;
   }
   // else
@@ -467,7 +505,7 @@ bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg,
 #ifndef NDEBUG
   const bool ok =
 #endif
-  Base::init_handlers(on_err_func_sio(), on_channel_func_sio());
+  core()->init_handlers(on_err_func_sio(), on_channel_func_sio());
 
   assert(ok && "We should have caught this with the above guard.");
   return true;
@@ -479,7 +517,7 @@ bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg)
 {
   if (!m_on_err_func.empty())
   {
-    FLOW_LOG_WARNING("Session_adapter [" << *this << "]: init_handlers() called duplicately.  Ignoring.");
+    FLOW_LOG_WARNING("Session_adapter [" << *m_async_io << "]: init_handlers() called duplicately.  Ignoring.");
     return false;
   }
   // else
@@ -489,7 +527,7 @@ bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg)
 #ifndef NDEBUG
   const bool ok =
 #endif
-  Base::init_handlers(on_err_func_sio());
+  core()->init_handlers(on_err_func_sio());
 
   assert(ok && "We should have caught this with the above guard.");
   return true;
@@ -507,7 +545,7 @@ void Session_adapter<Session>::init_pipe(util::Pipe_reader* reader, util::Pipe_w
   connect_pipe(*reader, *writer, sys_err_code);
   if (sys_err_code)
   {
-    FLOW_LOG_FATAL("Session_adapter [" << *this << "]: Constructing: connect-pipe failed.  Details follow.");
+    FLOW_LOG_FATAL("Session_adapter [" << *m_async_io << "]: Constructing: connect-pipe failed.  Details follow.");
     FLOW_ERROR_SYS_ERROR_LOG_FATAL();
     assert(false && "We chose not to complicate the code given how unlikely this is, and how hosed you'd have to be.");
     std::abort();
@@ -524,7 +562,7 @@ bool Session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
 
   if (!m_ev_wait_func.empty())
   {
-    FLOW_LOG_WARNING("Session_adapter [" << *this << "]: Start-ops requested, "
+    FLOW_LOG_WARNING("Session_adapter [" << *m_async_io << "]: Start-ops requested, "
                      "but we are already started.  Probably a user bug, but it is not for us to judge.");
     return false;
   }
@@ -539,7 +577,7 @@ bool Session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
              false, // Wait for read.
              boost::make_shared<Task>([this]()
   {
-    FLOW_LOG_INFO("Session_adapter [" << *this << "]: Async-IO core on-error event: informed via IPC-pipe; "
+    FLOW_LOG_INFO("Session_adapter [" << *m_async_io << "]: Async-IO core on-error event: informed via IPC-pipe; "
                   "invoking handler.");
     util::pipe_consume(get_logger(), &m_ready_reader_err); // No need really -- it's a one-time thing -- but just....
 
@@ -559,7 +597,7 @@ bool Session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
              false, // Wait for read.
              boost::make_shared<Task>([this]() { on_ev_channel_open(); }));
 
-  FLOW_LOG_INFO("Session_adapter [" << *this << "]: Start-ops requested.  Done.");
+  FLOW_LOG_INFO("Session_adapter [" << *m_async_io << "]: Start-ops requested.  Done.");
   return true;
 } // Session_adapter::start_ops()
 
@@ -575,7 +613,7 @@ void Session_adapter<Session>::on_ev_channel_open()
   {
     Lock_guard<decltype(m_target_channel_open_q_mutex)> lock(m_target_channel_open_q_mutex);
 
-    FLOW_LOG_INFO("Session_adapter [" << *this << "]: Async-IO core passively-opened channel event: "
+    FLOW_LOG_INFO("Session_adapter [" << *m_async_io << "]: Async-IO core passively-opened channel event: "
                   "informed via IPC-pipe; invoking handler.  Including this one "
                   "[" << m_target_channel_open_q.size() << "] are pending.");
 
@@ -605,13 +643,13 @@ bool Session_adapter<Session>::replace_event_wait_handles(const Create_ev_wait_h
 
   if (!m_ev_wait_func.empty())
   {
-    FLOW_LOG_WARNING("Session_adapter [" << *this << "]: Cannot replace event-wait handles after "
+    FLOW_LOG_WARNING("Session_adapter [" << *m_async_io << "]: Cannot replace event-wait handles after "
                      "a start-*-ops procedure has been executed.  Ignoring.");
     return false;
   }
   // else
 
-  FLOW_LOG_INFO("Session_adapter [" << *this << "]: Replacing event-wait handles (probably to replace underlying "
+  FLOW_LOG_INFO("Session_adapter [" << *m_async_io << "]: Replacing event-wait handles (probably to replace underlying "
                 "execution context without outside event loop's boost.asio Task_engine or similar).");
 
   assert(m_ev_wait_hndl_err.is_open());
@@ -637,7 +675,7 @@ flow::async::Task_asio_err Session_adapter<Session>::on_err_func_sio()
 
   return [this](const Error_code& err_code)
   {
-    FLOW_LOG_INFO("Session_adapter [" << *this << "]: Async-IO core reports on-error event: tickling IPC-pipe to "
+    FLOW_LOG_INFO("Session_adapter [" << *m_async_io << "]: Async-IO core reports on-error event: tickling IPC-pipe to "
                   "inform user.");
 
     assert((!m_target_err_code_err)
@@ -664,7 +702,7 @@ typename Session_adapter<Session>::On_channel_func
     {
       Lock_guard<decltype(m_target_channel_open_q_mutex)> lock(m_target_channel_open_q_mutex);
 
-      FLOW_LOG_INFO("Session_adapter [" << *this << "]: Async-IO core reports passively-opened channel event: "
+      FLOW_LOG_INFO("Session_adapter [" << *m_async_io << "]: Async-IO core reports passively-opened channel event: "
                     "tickling IPC-pipe to inform user.  This will make the # of pending such events "
                     "[" << (m_target_channel_open_q.size() + 1) << "].");
       m_target_channel_open_q.emplace(boost::movelib::make_unique<Channel_open_result>());
@@ -688,6 +726,30 @@ template<typename... Args>
 void Session_adapter<Session>::async_wait(Args&&... args)
 {
   m_ev_wait_func(std::forward<Args>(args)...);
+}
+
+template<typename Session>
+typename Session_adapter<Session>::Session_obj* Session_adapter<Session>::core()
+{
+  return &(m_async_io.value());
+}
+
+template<typename Session>
+const typename Session_adapter<Session>::Session_obj* Session_adapter<Session>::core() const
+{
+  return const_cast<Session_adapter*>(this)->core();
+}
+
+template<typename Session>
+flow::log::Logger* Session_adapter<Session>::get_logger() const
+{
+  return core()->get_logger();
+}
+
+template<typename Session>
+const flow::log::Component& Session_adapter<Session>::get_log_component() const
+{
+  return core()->get_log_component();
 }
 
 } // namespace ipc::session::sync_io
