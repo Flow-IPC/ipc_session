@@ -318,7 +318,7 @@ bool Client_session_adapter<Session>::async_connect(Task_err&& on_done_func)
   // else
   m_on_conn_func_or_empty = std::move(on_done_func);
 
-  if (!Base::Base::async_connect([this](const Error_code& err_code) { conn_write(err_code); }))
+  if (!core()->async_connect([this](const Error_code& err_code) { conn_write(err_code); }))
   {
     m_on_conn_func_or_empty.clear(); // Undo.
     return false; // Connect while connected, or something.  It logged.
@@ -352,10 +352,10 @@ bool Client_session_adapter<Session>::async_connect
   // else
   m_on_conn_func_or_empty = std::move(on_done_func);
 
-  const bool ok = Base::Base::async_connect(mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null,
-                                            init_channels_by_srv_req,
-                                            [this](const Error_code& err_code)
-                                              { conn_write(err_code); });
+  const bool ok = core()->async_connect(mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null,
+                                        init_channels_by_srv_req,
+                                        [this](const Error_code& err_code)
+                                          { conn_write(err_code); });
   if (!ok)
   {
     m_on_conn_func_or_empty.clear(); // Undo.
