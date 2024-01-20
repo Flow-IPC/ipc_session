@@ -432,7 +432,8 @@ Session_adapter<Session>::Session_adapter() :
   m_ev_wait_hndl_err(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
   m_ready_reader_chan(m_nb_task_engine),
   m_ready_writer_chan(m_nb_task_engine),
-  m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused)
+  m_ev_wait_hndl_chan(m_ev_hndl_task_engine_unused),
+  m_async_io(std::in_place)
 {
   init_pipe(&m_ready_reader_err, &m_ready_writer_err, &m_ev_wait_hndl_err);
   init_pipe(&m_ready_reader_chan, &m_ready_writer_chan, &m_ev_wait_hndl_chan);
