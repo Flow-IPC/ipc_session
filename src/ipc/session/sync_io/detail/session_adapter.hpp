@@ -232,6 +232,12 @@ protected:
    */
   Session_obj* core();
 
+  /**
+   * The adapted mutable #Session_obj.
+   * @return See above.
+   */
+  const Session_obj* core() const;
+
 private:
   // Types.
 
@@ -706,6 +712,12 @@ template<typename Session>
 typename Session_adapter<Session>::Session_obj* Session_adapter<Session>::core()
 {
   return &m_async_io;
+}
+
+template<typename Session>
+const typename Session_adapter<Session>::Session_obj* Session_adapter<Session>::core() const
+{
+  return const_cast<Session_adapter*>(this)->core();
 }
 
 template<typename Session>
