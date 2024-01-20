@@ -144,43 +144,47 @@ public:
    */
   const Client_app* client_app() const;
 
-    /**
-     * To be invoked by public user upon first obtaining `*this`: memorizes the given on-error and on-passive-open
-     * handlers thus moving this Server_session_mv to PEER state wherein it is a formal Session concept impl.
-     *
-     * Using this overload indicates passive-opens are enabled on this side.
-     *
-     * Suggestion: use client_app() to determine the opposing Client_app, particularly if this Server_app is designed
-     * to accept sessions from 2+ `Client_app`s.  (To be clear: Multiple *instances* (processes) of a *given* Client_app
-     * are always supported.  However a given Server_app -- specified at Session_server construction time --
-     * may well specify only one allowed opposing Client_app.)  It is likely that a different on-passive-open handler
-     * would be useful depending on Client_app; possibly also different on-error handler.
-     *
-     * @tparam Task_err
-     *         See Session concept doc header for semantics.
-     * @tparam On_passive_open_channel_handler
-     *         See Session concept doc header for semantics.
-     * @param on_err_func_arg
-     *        On-error handler per semantics in Session concept doc header.
-     * @param on_passive_open_channel_func_arg
-     *        On-passive-open handler per semantics in Session concept doc header.
-     * @return `true` normally; `false` if invoked after already having called an init_handlers() or as-if default-cted.
-     */
-    template<typename Task_err, typename On_passive_open_channel_handler>
-    bool init_handlers(Task_err&& on_err_func_arg, On_passive_open_channel_handler&& on_passive_open_channel_func_arg);
+  /**
+   * To be invoked by public user upon first obtaining `*this`: memorizes the given on-error and on-passive-open
+   * handlers thus moving this Server_session_mv to PEER state wherein it is a formal Session concept impl.
+   *
+   * Using this overload indicates passive-opens are enabled on this side.
+   *
+   * Suggestion: use client_app() to determine the opposing Client_app, particularly if this Server_app is designed
+   * to accept sessions from 2+ `Client_app`s.  (To be clear: Multiple *instances* (processes) of a *given* Client_app
+   * are always supported.  However a given Server_app -- specified at Session_server construction time --
+   * may well specify only one allowed opposing Client_app.)  It is likely that a different on-passive-open handler
+   * would be useful depending on Client_app; possibly also different on-error handler.
+   *
+   * @tparam Task_err
+   *         See Session concept doc header for semantics.
+   * @tparam On_passive_open_channel_handler
+   *         See Session concept doc header for semantics.
+   * @param on_err_func_arg
+   *        On-error handler per semantics in Session concept doc header.
+   * @param on_passive_open_channel_func_arg
+   *        On-passive-open handler per semantics in Session concept doc header.
+   * @return `true` normally; `false` if invoked after already having called an init_handlers() or as-if default-cted.
+   */
+  template<typename Task_err, typename On_passive_open_channel_handler>
+  bool init_handlers(Task_err&& on_err_func_arg, On_passive_open_channel_handler&& on_passive_open_channel_func_arg);
 
-    /**
-     * Alternative to the other init_handlers().  Using this overload indicates passive-opens are disabled on this side.
-     * Otherwise identical to the other init_handlers() overload.
-     *
-     * @tparam Task_err
-     *         See other init_handlers().
-     * @param on_err_func_arg
-     *        See other init_handlers().
-     * @return `true` normally; `false` if invoked after already having called an init_handlers() or as-if default-cted.
-     */
-    template<typename Task_err>
-    bool init_handlers(Task_err&& on_err_func_arg);
+  /**
+   * Alternative to the other init_handlers().  Using this overload indicates passive-opens are disabled on this side.
+   * Otherwise identical to the other init_handlers() overload.
+   *
+   * @tparam Task_err
+   *         See other init_handlers().
+   * @param on_err_func_arg
+   *        See other init_handlers().
+   * @return `true` normally; `false` if invoked after already having called an init_handlers() or as-if default-cted.
+   */
+  template<typename Task_err>
+  bool init_handlers(Task_err&& on_err_func_arg);
+
+  // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
+  using Base::get_logger;
+  using Base::get_log_component;
 
 protected:
   // Constructors.
@@ -291,10 +295,6 @@ protected:
                            N_init_channels_by_srv_req_func&& n_init_channels_by_srv_req_func,
                            Mdt_load_func&& mdt_load_func,
                            Task_err&& on_done_func);
-
-  // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
-  using Base::get_logger;
-  using Base::get_log_component;
 }; // class Server_session_mv
 
 // Free functions: in *_fwd.hpp.
