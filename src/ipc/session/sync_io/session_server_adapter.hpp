@@ -70,8 +70,7 @@ namespace ipc::session::sync_io
  *         `session::shm::jemalloc::Session_server<knobs>`.
  */
 template<typename Session_server>
-class Session_server_adapter :
-  private Session_server
+class Session_server_adapter
 {
 public:
   // Types.
@@ -197,16 +196,19 @@ public:
    */
   const Session_server_obj* core() const;
 
-  // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
-  using Session_server_obj::get_logger;
-  using Session_server_obj::get_log_component;
+  /**
+   * See `flow::log::Log_context`.
+   * @return See above.
+   */
+  flow::log::Logger* get_logger() const;
+
+  /**
+   * See `flow::log::Log_context`.
+   * @return See above.
+   */
+  const flow::log::Component& get_log_component() const;
 
 private:
-  // Types.
-
-  /// Our main base.
-  using Base = Session_server_obj;
-
   // Methods.
 
   /**
@@ -250,6 +252,9 @@ private:
 
   /// Result given to (or about to be given to) #m_on_done_func_or_empty.
   Error_code m_target_err_code;
+
+  /// This guy does all the work.  In our dtor this will be destroyed (hence thread stopped) first-thing.
+  Async_io_obj m_async_io;
 }; // class Session_server_adapter
 
 // Free functions: in *_fwd.hpp.
@@ -259,11 +264,10 @@ private:
 template<typename Session_server>
 template<typename... Ctor_args>
 Session_server_adapter<Session_server>::Session_server_adapter(Ctor_args&&... ctor_args) :
-  Base(std::forward<Ctor_args>(ctor_args)...), // That had to have set up get_logger(), etc., by the way.
-
   m_ready_reader(m_nb_task_engine), // No handle inside but will be set-up soon below.
   m_ready_writer(m_nb_task_engine), // Ditto.
-  m_ev_wait_hndl(m_ev_hndl_task_engine_unused) // This needs to be .assign()ed still.
+  m_ev_wait_hndl(m_ev_hndl_task_engine_unused), // This needs to be .assign()ed still.
+  m_async_io(std::forward<Ctor_args>(ctor_args)...) // That had to have set up get_logger(), etc., by the way.
 {
   using util::Native_handle;
   using boost::asio::connect_pipe;
@@ -347,8 +351,8 @@ bool Session_server_adapter<Session_server>::async_accept(Session_obj* target_se
   // else
   m_on_done_func_or_empty = std::move(on_done_func);
 
-  Base::async_accept(target_session->core(), // <-- ATTN!  It is fine, because we don't do core()->init_handlers(). -*-
-                     [this](const Error_code& err_code) { accept_write(err_code); });
+  core()->async_accept(target_session->core(), // <-- ATTN!  It's fine, because we don't do core()->init_handlers(). -*-
+                       [this](const Error_code& err_code) { accept_write(err_code); });
   // -*- They will need to do target_session->init_handlers() (analogously to vanilla would-be core()->init_handlers()).
 
   m_ev_wait_func(&m_ev_wait_hndl,
@@ -381,10 +385,10 @@ bool Session_server_adapter<Session_server>::async_accept
   // else
   m_on_done_func_or_empty = std::move(on_done_func);
 
-  Base::async_accept(target_session->core(), // <-- ATTN!  It is fine, because we don't do core()->init_handlers(). -*-
-                     init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
-                     std::move(n_init_channels_by_srv_req_func), std::move(mdt_load_func),
-                     [this](const Error_code& err_code) { accept_write(err_code); });
+  core()->async_accept(target_session->core(), // <-- ATTN!  It's fine, because we don't do core()->init_handlers(). -*-
+                       init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
+                       std::move(n_init_channels_by_srv_req_func), std::move(mdt_load_func),
+                       [this](const Error_code& err_code) { accept_write(err_code); });
   // -*- They will need to do target_session->init_handlers() (analogously to vanilla would-be core()->init_handlers()).
 
   m_ev_wait_func(&m_ev_wait_hndl,
@@ -429,7 +433,7 @@ template<typename Session_server>
 typename Session_server_adapter<Session_server>::Session_server_obj*
   Session_server_adapter<Session_server>::core()
 {
-  return static_cast<Session_server_obj*>(this);
+  return &m_async_io;
 }
 
 template<typename Session_server>
@@ -437,6 +441,18 @@ const typename Session_server_adapter<Session_server>::Session_server_obj*
   Session_server_adapter<Session_server>::core() const
 {
   return const_cast<Session_server_adapter*>(this)->core();
+}
+
+template<typename Session_server>
+flow::log::Logger* Session_server_adapter<Session_server>::get_logger() const
+{
+  return core()->get_logger();
+}
+
+template<typename Session_server>
+const flow::log::Component& Session_server_adapter<Session_server>::get_log_component() const
+{
+  return core()->get_log_component();
 }
 
 template<typename Session_server>
