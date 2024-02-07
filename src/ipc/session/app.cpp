@@ -50,7 +50,7 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
   FLOW_LOG_SET_CONTEXT(logger_ptr, Log_component::S_SESSION);
 
   /* We can either reuse the handle-based overload, or we can do stat() instead of fstat().  The former seems nicer;
-   * though we'll have to open a handle temporarily.  I've seen Boost.interprocess do it fairly casually for
+   * though we'll have to open a handle temporarily.  I've seen boost.interprocess do it fairly casually for
    * similar purposes, so why not.  The O_PATH flag (which opens the resource just for this purpose -- not for
    * I/O) is perfect for it, particularly since the resource might not be a file but a SHM pool, etc. */
 

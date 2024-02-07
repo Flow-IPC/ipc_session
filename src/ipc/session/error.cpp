@@ -124,7 +124,7 @@ std::string Category::message(int val) const // Virtual.
     return "Session channel opening: "
              "Other peer must reply quickly enough as-if non-blocking but did not do so in time.";
   case Code::S_MUTEX_BIPC_MISC_LIBRARY_ERROR:
-    return "Low-level Boost.ipc.mutex: boost.interprocess emitted miscellaneous library exception sans a system code; "
+    return "Low-level boost.ipc.mutex: boost.interprocess emitted miscellaneous library exception sans a system code; "
            "a WARNING message at throw-time should contain all possible details.";
   case Code::S_SERVER_MASTER_POST_LOG_IN_SEND_FAILED_MISC:
     return "Session master channel: post-log-in setup (such as SHM setup): send failed because channel hosed "
