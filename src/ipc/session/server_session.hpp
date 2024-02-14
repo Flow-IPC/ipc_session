@@ -20,6 +20,7 @@
 
 #include "ipc/session/session.hpp"
 #include "ipc/session/detail/server_session_impl.hpp"
+#include <boost/move/make_unique.hpp>
 
 namespace ipc::session
 {
