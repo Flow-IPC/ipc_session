@@ -1844,7 +1844,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       // Now we can send the log-in response finally.
 
                       // Similarly to Client_session_impl: give them our version info, so they can verify, as we did.
-                      auto proto_neg_root = log_in_rsp_msg_root.initProtocolNegotiationToClient();
+                      auto proto_neg_root = log_in_rsp_root.initProtocolNegotiationToClient();
                       proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
                       proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
 
