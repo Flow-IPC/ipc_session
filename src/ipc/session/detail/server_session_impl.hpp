@@ -669,8 +669,8 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
   /* Initial protocol = 1!
    * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
    *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
-  m_protocol_negotiator(get_logger(), flow::util::ostream_op_string(*this), 1, 1),
-  m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string(*this), 1, 1),
+  m_protocol_negotiator(get_logger(), flow::util::ostream_op_string("srv-sess-", *this), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string("srv-sess-aux-", *this), 1, 1),
 
   m_master_sock_stm(std::move(master_channel_sock_stm)),
   m_last_passively_opened_channel_id(0),

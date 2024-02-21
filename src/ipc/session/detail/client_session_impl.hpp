@@ -828,8 +828,8 @@ CLASS_CLI_SESSION_IMPL::Client_session_impl(flow::log::Logger* logger_ptr,
   /* Initial protocol = 1!
    * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
    *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
-  m_protocol_negotiator(get_logger(), flow::util::ostream_op_string(*this), 1, 1),
-  m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string(*this), 1, 1),
+  m_protocol_negotiator(get_logger(), flow::util::ostream_op_string("cli-sess-", *this), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string("cli-sess-aux-", *this), 1, 1),
 
   m_last_actively_opened_channel_id(0),
   m_last_passively_opened_channel_id(0),
