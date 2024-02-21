@@ -1325,7 +1325,7 @@ void CLASS_CLI_SESSION_IMPL::conn_on_async_connect_or_error(const Shared_name& a
       // Please see "Protocol negotiation" in our class doc header for discussion.
       m_protocol_negotiator.reset(); // In case this is a 2nd, 3rd, ... connect attempt or something.
       m_protocol_negotiator_aux.reset();
-      auto proto_neg_root = msg_root.initProtocolNegotiation();
+      auto proto_neg_root = msg_root.initProtocolNegotiationToServer();
       proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
       proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
       /* That was our advertising our capabilities to them.  We'll perform negotiation check at LogInRsp receipt.
@@ -1454,7 +1454,7 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp
 
     /* Please see similar code on server side; they will have made the same check before issuing the LogInRsp to us.
      * Protocol-negotiation occurs *here*, before any further fields are interpreted. */
-    const auto proto_neg_root = log_in_rsp_root.getProtocolNegotiation();
+    const auto proto_neg_root = log_in_rsp_root.getProtocolNegotiationToClient();
     m_protocol_negotiator.compute_negotiated_proto_ver(proto_neg_root.getMaxProtoVer(), &err_code);
     if (!err_code)
     {

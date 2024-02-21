@@ -1683,7 +1683,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
          * schema .capnp file around ProtocolNegotiation-typed fields.
          *
          * Protocol-negotiation occurs *here*, before any further fields are interpreted. */
-        const auto proto_neg_root = msg_root.getProtocolNegotiation();
+        const auto proto_neg_root = msg_root.getProtocolNegotiationToServer();
         m_protocol_negotiator.compute_negotiated_proto_ver(proto_neg_root.getMaxProtoVer(), &err_code);
         if (!err_code)
         {
@@ -1844,7 +1844,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       // Now we can send the log-in response finally.
 
                       // Similarly to Client_session_impl: give them our version info, so they can verify, as we did.
-                      auto proto_neg_root = log_in_rsp_msg_root.initProtocolNegotiation();
+                      auto proto_neg_root = log_in_rsp_msg_root.initProtocolNegotiationToClient();
                       proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
                       proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
 

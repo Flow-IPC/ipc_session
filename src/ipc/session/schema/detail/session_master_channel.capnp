@@ -139,7 +139,7 @@ struct LogInReq(MetadataPayload)
   #
   # As noted above the following 2 knobs, as of this writing, are for verification purposes only.
 
-  protocolNegotiationCliToSrv @0 :ProtocolNegotiation;
+  protocolNegotiationToServer @0 :ProtocolNegotiation;
   # Protocol capability information that client is advertising about itself to server.
   # Upon receiving the LogInReq, server -- before processing any further fields -- ensures that it supports
   # min(<this>, <its own preferred (highest) version>) (for each layer in ProtocolNegotiation).  If so, continue.
@@ -210,8 +210,8 @@ struct LogInRsp(MetadataPayload)
   # Response to LogInReq.  If received then log-in successful.  If channel closed instead the unsuccessful.
   # TODO: Consider adding failed LogInRsp variant with reason code a-la OpenChannelResult.
 
-  protocolNegotiationSrvToCli @0 :ProtocolNegotiation;
-  # Identical stuff to LogInReq.protocolNegotiationCliToSrv -- see that guy.
+  protocolNegotiationToClient @0 :ProtocolNegotiation;
+  # Identical stuff to LogInReq.protocolNegotiationToServer -- see that guy.
   # So assuming server is happy and sends LogInRsp, client performs identical check on these data.
   # If it's not happy (even though server was, hence why it even responses with LogInRsp), *it* closes session.
 
