@@ -85,7 +85,7 @@ enum class Code
   S_SESSION_OPEN_CHANNEL_ACTIVE_TIMEOUT,
 
   /**
-   * Low-level Boost.ipc.mutex: boost.interprocess emitted miscellaneous library exception sans a system code;
+   * Low-level boost.ipc.mutex: boost.interprocess emitted miscellaneous library exception sans a system code;
    * a WARNING message at throw-time should contain all possible details.
    */
   S_MUTEX_BIPC_MISC_LIBRARY_ERROR,

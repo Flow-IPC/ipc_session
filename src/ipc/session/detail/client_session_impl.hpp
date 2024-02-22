@@ -21,6 +21,7 @@
 #include "ipc/session/detail/session_base.hpp"
 #include "ipc/session/error.hpp"
 #include "ipc/transport/error.hpp"
+#include "ipc/transport/protocol_negotiator.hpp"
 #include "ipc/util/detail/util.hpp"
 #include <boost/interprocess/sync/named_mutex.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
@@ -69,6 +70,68 @@ namespace ipc::session
  * the protocol involved, both in CONNECTING (after the socket is connected) and in PEER.  Also notable is that
  * this setup allows us to immediately "eat our own dog food" by using a `struc::Channel` to enable the opening
  * of any further channels (structured or otherwise).
+ *
+ * ### Protocol negotiation ###
+ * First please see transport::struc::sync_io::Channel doc header section of the same name.  (There is involved
+ * discussion there which we definitely don't want to repeat.)  Then come back here.
+ *
+ * How we're similar: `Channel` decided to divide the protocols into 2: one in struc::sync_io::Channel code itself,
+ * and the rest in whatever extra stuff might be involved in the (likely SHM-related, optionally used)
+ * non-vanilla transport::struc::Struct_builder and transport::struc::Struct_reader concept impls (namely
+ * most likely transport::struc::shm::Builder and transport::struc::shm::Reader).  So essentially there's the
+ * `ipc_transport_structured` part, and the (other) part (likely but not necessarily from `ipc_shm`).  We do
+ * something vaguely similar conceptually:
+ *   - There is the basic ipc::session protocol, including the `LogInReq/LogInRsp/OpenChannel*` messages.  This
+ *     is from ipc::session proper (`ipc_session` module/library).
+ *   - There is the optionally-used protocol woven into it activated by the fact the user chose to use
+ *     ipc::session::shm (or maybe even their own) `Session` hierarchy.  (As of this writing, ipc::session::shm
+ *     contains two hierarchies, depending on the SHM-provider of choice: SHM-classic `shm::classic` or
+ *     SHM-jemalloc `shm::arena_lend::jemalloc`.)
+ *
+ * So we, too, maintain two `Protocol_negotiator`s: the main one and the "aux" one for those two bullet points
+ * respectively.  As of this writing there is only version 1 of everything; but if this changes for one of the
+ * "aux" `Session` hierarchies -- e.g., SHM-jemalloc's internally used ipc_session_message.capnp channel/schema --
+ * then that guy's "aux" protocol-version can be bumped up.  (In the case of ipc_session_message.capnp specifically,
+ * and I say this only for exposition, that code can -- if it wants -- do its own protocol negotiation along its
+ * own channel; but by leveraging the "aux" `Protocol_negotiator` version infrastructure, they do not have to.
+ * Good for perf and, in this case more importantly, good for keeping code complexity down.)
+ *
+ * How we're different: The mechanics of protocol-version exchange are simpler for us, because we have a built-in
+ * SYN/SYN-ACK like exchange at the start (log-in-request, log-in-response) via the session master channel.
+ * So we piggy-back (piggy-front?) the protocol-negotiation info onto those 2 messages which exist anyway.
+ * You can see that now by looking at session_master_channel.capnp and noting how `ProtocolNegotiation` fields
+ * sit up-top in `LogInReq` and `LogInRsp`.  As Protocol_version doc header discussion suggests, it is important
+ * to verify the `ProtocolNegotiation` fields before interpreting any other part of the incoming `LogInReq` and
+ * `LogInRsp` by server and client respectively (and in that chronological order, as guaranteed by the handshake
+ * setup).
+ *
+ * (In contrast to this: struc::sync_io::Channel does not itself have a mandatory built-in handshake phase.  Hence
+ * each side has to send a special `ProtocolNegotiation` message ASAP and expect one -- in each pipe of up-to-2 --
+ * to come in as well.  No handshake/client/server => the two exchanges are full-duplex, that is mutually
+ * independent, in nature.)
+ *
+ * If you're keeping score: as of this writing, the most complex/full-featured setup for a session is
+ * the SHM-jemalloc session setup.  Excluding any structured channels opened within the session, the following
+ * transport::Protocol_negotiator negotiations shall occur:
+ *   - Session master channel `Native_socket_stream` low-level protocol (1 `Protocol_negotiator` per side).
+ *     Full-duplex exchange.
+ *   - Session master channel `struc::Channel` protocol (2 `Protocol_negotiator`s per side, "aux" one unused
+ *     because the session master channel is a vanilla, non-SHM-backed channel).
+ *     Full-duplex exchange.
+ *   - Session master channel vanilla session protocol (1 `Protocol_negotiator` per side).
+ *     Handshake exchange.
+ *   - Session master channel SHM-jemalloc session protocol (1 `Protocol_negotiator` per side).
+ *     Handshake exchange (same one as in the previous bullet point).
+ *
+ * Unrelated to sessions, consider the most complex/full-featured setup for a user `transport::struc::Channel` operating
+ * over a 2-pipe `transport::Channel` (1 pipe for blobs, 1 pipe for `Native_handle`s):
+ *   - User channel `Native_socket_stream` low-level protocol (1 `Protocol_negotiator` per side).
+ *     Full-duplex exchange (pipe 1).
+ *   - User channel `Blob_stream_mq_*er` low-level protocol (1 `Protocol_negotiator` per side).
+ *     Full-duplex exchange (pipe 2, same layer as preceding bullet point, different transport type).
+ *   - Session master channel `struc::Channel` protocol (2 `Protocol_negotiator`s per side; main one for the vanilla
+ *     layer, "aux" one for the SHM layer).
+ *     Full-duplex exchange.
  *
  * ### PEER state impl ###
  * Here our algorithm is complementary to the PEER state algorithm in Server_session_impl.  Namely we expect
@@ -666,6 +729,27 @@ private:
   State m_state;
 
   /**
+   * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
+   * the vanilla ipc::session `Session` hierarchy.  Reset essentially at start of each async_connect().
+   *
+   * Outgoing-direction state is touched when assembling `LogInReq` to send to opposing `Server_session`.
+   * Incoming-direction state is touched/verified at the start of interpreting `LogInRsp` receiver from there.
+   *
+   * @see transport::Protocol_negotiator doc header for key background on the topic.
+   */
+  transport::Protocol_negotiator m_protocol_negotiator;
+
+  /**
+   * Analogous to #m_protocol_negotiator but pertains to algorithms perpetuated by (if relevant)
+   * non-vanilla ipc::session `Session` hierarchy implemented on top of our vanilla ipc::session `Session` hierarchy.
+   * For example, ipc::session::shm hierarchies can use this to version whatever additional protocol is required
+   * to establish SHM things.
+   *
+   * @see transport::Protocol_negotiator doc header for key background on the topic.
+   */
+  transport::Protocol_negotiator m_protocol_negotiator_aux;
+
+  /**
    * The `on_done_func` argument to async_connect(); `.empty()` except while in State::S_CONNECTING state.
    * In other words it is assigned at entry to CONNECTING and `.clear()`ed at subsequent entry to State::S_PEER
    * or State::S_NULL (depending on success/failure of the connect op).
@@ -740,6 +824,13 @@ CLASS_CLI_SESSION_IMPL::Client_session_impl(flow::log::Logger* logger_ptr,
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
 
   m_state(State::S_NULL),
+
+  /* Initial protocol = 1!
+   * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
+   *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
+  m_protocol_negotiator(get_logger(), flow::util::ostream_op_string("cli-sess-", *this), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string("cli-sess-aux-", *this), 1, 1),
+
   m_last_actively_opened_channel_id(0),
   m_last_passively_opened_channel_id(0),
   m_async_worker(get_logger(), flow::util::ostream_op_string("cli_sess[", *this, ']'))
@@ -1167,112 +1258,141 @@ void CLASS_CLI_SESSION_IMPL::conn_on_async_connect_or_error(const Shared_name& a
      *      easily than when having to operate a sync_io core);
      *   - so obtain the sync_io core N_s_s from async-I/O N_s_s using sock_stm.release(). */
 
-    transport::Socket_stream_channel<true>
-      unstructured_master_channel(get_logger(), ostream_op_string("smc-", *this),
-                                  sock_stm.release());
+    auto sock_stm_core = sock_stm.release();
+    /* Unfortunately there is this really annoying corner case: .release() may yield a NULL-state core, if
+     * sock_stm connected OK but the protocol-negotiation send failed immediately. */
+    if (sock_stm_core.send_blob_max_size() == 0)
     {
-      const auto opposing_proc_creds = unstructured_master_channel.remote_peer_process_credentials(&err_code);
-      assert((!err_code) && "It really should not fail that early.  If it does look into this code.");
-      FLOW_LOG_INFO("Client session [" << *this << "]: Opposing process info: [" << opposing_proc_creds << "].");
+      FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
+                       "async-connect to [" << acc_name << "] successfully yielded socket-stream peer; "
+                       "but protocol-negotiation initial-send apparently failed immediately (details likely logged "
+                       "above).  Effectively it's as-if the connect failed; emitting error.");
+      err_code = transport::error::Code::S_PROTOCOL_NEGOTIATION_OPPOSING_VER_INVALID;
     }
-
-    // sock_stm is now hosed.  We have the Channel.  A couple more things before we can make it structured.
-
-    /* Finally: eat the Channel; make it live inside m_master_channel.  This session master channel requires
-     * a log-in phase (the only such channel in the session), so use that ctor. */
-    assert(!m_master_channel);
-    m_master_channel = make_shared<Master_structured_channel>(get_logger(), std::move(unstructured_master_channel),
-                                                              transport::struc::Channel_base::S_SERIALIZE_VIA_HEAP,
-                                                              false); // We are the client, not the server.
-    // unstructured_master_channel is now hosed.
-
-    /* Also enable liveness checking and keep-alive; the other side will do the same.
-     * Read comment in Server_session_impl in similar spot; the same applies symmetrically here. */
-    m_master_channel->owned_channel_mutable()->auto_ping();
-    m_master_channel->owned_channel_mutable()->idle_timer_run();
-
-    m_master_channel->start([this, master_channel_observer = Master_structured_channel_observer(m_master_channel)]
-                              (const Error_code& channel_err_code) mutable
+    else // if (sock_stm_core is fine -- in PEER state)
     {
-      // We are in thread Wc (unspecified, really struc::Channel async callback thread).
-      m_async_worker.post([this,
-                           master_channel_observer = std::move(master_channel_observer),
-                           channel_err_code]()
+      transport::Socket_stream_channel<true>
+        unstructured_master_channel(get_logger(), ostream_op_string("smc-", *this),
+                                    std::move(sock_stm_core));
       {
-        on_master_channel_error(master_channel_observer, channel_err_code);
-      });
-      // @todo Add unexpected response handlers?  One firing would be a bug, so formally it shouldn't be needed....
-    });
+        const auto opposing_proc_creds = unstructured_master_channel.remote_peer_process_credentials(&err_code);
+        assert((!err_code) && "It really should not fail that early.  If it does look into this code.");
+        FLOW_LOG_INFO("Client session [" << *this << "]: Opposing process info: [" << opposing_proc_creds << "].");
+      }
 
-    /* OK!  m_master_channel is rocking... but in the log-in phase (as client).  Follow the quite-rigid steps
-     * documented for that phase namely: create (and sync-nb-send) the log-in message and expect log-in
-     * response in-message the receipt of which means logged-in phase has been reached.  So this is another
-     * async step (we must await the response).  It should be quite quick, as the server is doing its half of
-     * the algorithm right now, but I digress.
-     *
-     * Except, actually, the log-in request message has already been created in mdt_builder(), so as to give
-     * user Builder into the metadata sub-field in there.  That should be mutated, as needed, and now
-     * we fill out the rest of it and sync-nb-send it. */
-    auto& log_in_req_msg = (reinterpret_cast<Master_channel_req*>(mdt.get()))->m_req_msg;
+      // sock_stm is now hosed.  We have the Channel.  A couple more things before we can make it structured.
 
-    // Fill out the log-in request.  See SessionMasterChannelMessageBody.LogInReq.
-    auto msg_root = log_in_req_msg.body_root()->getLogInReq();
-    msg_root.setMqTypeOrNone(S_MQ_TYPE_OR_NONE);
-    msg_root.setNativeHandleTransmissionEnabled(S_TRANSMIT_NATIVE_HANDLES);
-    msg_root.setShmTypeOrNone(S_SHM_TYPE);
-    // .metadata is already filled out.
-    msg_root.setNumInitChannelsByCliReq(init_channels_by_cli_req_pre_sized
-                                          ? init_channels_by_cli_req_pre_sized->size()
-                                          : 0);
+      /* Finally: eat the Channel; make it live inside m_master_channel.  This session master channel requires
+       * a log-in phase (the only such channel in the session), so use that ctor. */
+      assert(!m_master_channel);
+      m_master_channel = make_shared<Master_structured_channel>(get_logger(), std::move(unstructured_master_channel),
+                                                                transport::struc::Channel_base::S_SERIALIZE_VIA_HEAP,
+                                                                false); // We are the client, not the server.
+      // unstructured_master_channel is now hosed.
 
-    auto claimed_own_proc_creds = msg_root.initClaimedOwnProcessCredentials();
-    claimed_own_proc_creds.setProcessId(util::Process_credentials::own_process_id());
-    claimed_own_proc_creds.setUserId(util::Process_credentials::own_user_id());
-    claimed_own_proc_creds.setGroupId(util::Process_credentials::own_group_id());
-    msg_root.initOwnApp().setName(Base::cli_app_ptr()->m_name); // Our ClientApp::m_name (srv has list of allowed ones).
+      /* Also enable liveness checking and keep-alive; the other side will do the same.
+       * Read comment in Server_session_impl in similar spot; the same applies symmetrically here. */
+      m_master_channel->owned_channel_mutable()->auto_ping();
+      m_master_channel->owned_channel_mutable()->idle_timer_run();
 
-    // Synchronously, non-blockingly, can't-would-blockingly send it.  This can fail (it will log WARNING if so).
-    auto on_log_in_rsp_func
-      = [this, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
-          (typename Master_structured_channel::Msg_in_ptr&& log_in_rsp) mutable
-    {
-      // We are in thread Wc (as in above error handler).
-      m_async_worker.post([this, log_in_rsp = std::move(log_in_rsp),
-                           init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
-                            () mutable
+      m_master_channel->start([this, master_channel_observer = Master_structured_channel_observer(m_master_channel)]
+                                (const Error_code& channel_err_code) mutable
       {
-        on_master_channel_log_in_rsp(std::move(log_in_rsp),
-                                     init_channels_by_cli_req_pre_sized,
-                                     mdt_from_srv_or_null,
-                                     init_channels_by_srv_req);
+        // We are in thread Wc (unspecified, really struc::Channel async callback thread).
+        m_async_worker.post([this,
+                             master_channel_observer = std::move(master_channel_observer),
+                             channel_err_code]()
+        {
+          on_master_channel_error(master_channel_observer, channel_err_code);
+        });
+        // @todo Add unexpected response handlers?  One firing would be a bug, so formally it shouldn't be needed....
       });
-    };
-    if (!m_master_channel->async_request(log_in_req_msg, nullptr, nullptr, // One-off (single response).
-                                         std::move(on_log_in_rsp_func), &err_code))
-    {
-      /* The docs say send() (request-issuing form) returns false if:
-       * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
-       * via on-error handler; async_end_sending() has already been called."  Only the middle one is possible in
-       * our case.  on_master_channel_error() shall issue m_conn_on_done_func_or_empty(truthy) in our stead. */
-      FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
-                     "catch it shortly or has already caught it.");
-      return;
-    }
-    // else
 
-    if (err_code)
-    {
-      /* It failed, so as far as they're concerned, it's no different from the async-connect failing.  Back
-       * to the drawing board; and while at the drawing board the master channel is null; so make it so.
-       * err_code is set. */
-      m_master_channel.reset();
-    }
-    else
-    {
-      FLOW_LOG_TRACE("Client session [" << *this << "]: Log-in request issued.  Awaiting log-in response.  "
-                     "CONNECTING state still in effect.");
-      return;
-    }
+      /* OK!  m_master_channel is rocking... but in the log-in phase (as client).  Follow the quite-rigid steps
+       * documented for that phase namely: create (and sync-nb-send) the log-in message and expect log-in
+       * response in-message the receipt of which means logged-in phase has been reached.  So this is another
+       * async step (we must await the response).  It should be quite quick, as the server is doing its half of
+       * the algorithm right now, but I digress.
+       *
+       * Except, actually, the log-in request message has already been created in mdt_builder(), so as to give
+       * user Builder into the metadata sub-field in there.  That should be mutated, as needed, and now
+       * we fill out the rest of it and sync-nb-send it. */
+      auto& log_in_req_msg = (reinterpret_cast<Master_channel_req*>(mdt.get()))->m_req_msg;
+
+      // Fill out the log-in request.  See SessionMasterChannelMessageBody.LogInReq.
+      auto msg_root = log_in_req_msg.body_root()->getLogInReq();
+
+      // Please see "Protocol negotiation" in our class doc header for discussion.
+      m_protocol_negotiator.reset(); // In case this is a 2nd, 3rd, ... connect attempt or something.
+      m_protocol_negotiator_aux.reset();
+      auto proto_neg_root = msg_root.initProtocolNegotiationToServer();
+      proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
+      proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
+      /* That was our advertising our capabilities to them.  We'll perform negotiation check at LogInRsp receipt.
+       *
+       * Maintenance note: This is also remarked upon as of this writing in the schema .capnp file around LogInReq:
+       * If we add more versions than 1 in the future, *and* we aim to be backwards-compatible with at least 1
+       * older protocol version, then we must be careful in the below LogInReq setter code; as at *this* time we don't
+       * yet know server side's capabilities (not until LogInRsp!), hence we can't know which version to speak.
+       * So until then (which isn't long) we need to be protocol-version-agnostic. */
+
+      msg_root.setMqTypeOrNone(S_MQ_TYPE_OR_NONE);
+      msg_root.setNativeHandleTransmissionEnabled(S_TRANSMIT_NATIVE_HANDLES);
+      msg_root.setShmTypeOrNone(S_SHM_TYPE);
+      // .metadata is already filled out.
+      msg_root.setNumInitChannelsByCliReq(init_channels_by_cli_req_pre_sized
+                                            ? init_channels_by_cli_req_pre_sized->size()
+                                            : 0);
+
+      auto claimed_own_proc_creds = msg_root.initClaimedOwnProcessCredentials();
+      claimed_own_proc_creds.setProcessId(util::Process_credentials::own_process_id());
+      claimed_own_proc_creds.setUserId(util::Process_credentials::own_user_id());
+      claimed_own_proc_creds.setGroupId(util::Process_credentials::own_group_id());
+      msg_root.initOwnApp().setName(Base::cli_app_ptr()->m_name); // Our ClientApp::m_name (srv has list of allowed ones).
+
+      // Synchronously, non-blockingly, can't-would-blockingly send it.  This can fail (it will log WARNING if so).
+      auto on_log_in_rsp_func
+        = [this, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
+            (typename Master_structured_channel::Msg_in_ptr&& log_in_rsp) mutable
+      {
+        // We are in thread Wc (as in above error handler).
+        m_async_worker.post([this, log_in_rsp = std::move(log_in_rsp),
+                             init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
+                              () mutable
+        {
+          on_master_channel_log_in_rsp(std::move(log_in_rsp),
+                                       init_channels_by_cli_req_pre_sized,
+                                       mdt_from_srv_or_null,
+                                       init_channels_by_srv_req);
+        });
+      };
+      if (!m_master_channel->async_request(log_in_req_msg, nullptr, nullptr, // One-off (single response).
+                                           std::move(on_log_in_rsp_func), &err_code))
+      {
+        /* The docs say send() (request-issuing form) returns false if:
+         * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
+         * via on-error handler; async_end_sending() has already been called."  Only the middle one is possible in
+         * our case.  on_master_channel_error() shall issue m_conn_on_done_func_or_empty(truthy) in our stead. */
+        FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
+                       "catch it shortly or has already caught it.");
+        return;
+      }
+      // else
+
+      if (err_code)
+      {
+        /* It failed, so as far as they're concerned, it's no different from the async-connect failing.  Back
+         * to the drawing board; and while at the drawing board the master channel is null; so make it so.
+         * err_code is set. */
+        m_master_channel.reset();
+      }
+      else
+      {
+        FLOW_LOG_TRACE("Client session [" << *this << "]: Log-in request issued.  Awaiting log-in response.  "
+                       "CONNECTING state still in effect.");
+        return;
+      }
+    } // else if (sock_stm_core is fine -- in PEER state)
   } // if (!err_code) // But it can become truthy inside.
   else
   {
@@ -1332,64 +1452,80 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp
   {
     const auto log_in_rsp_root = body_root.getLogInRsp();
 
-    const auto n_init_channels_by_srv_req = log_in_rsp_root.getNumInitChannelsBySrvReq();
-    if ((n_init_channels_by_srv_req != 0) && (!init_channels_by_srv_req))
+    /* Please see similar code on server side; they will have made the same check before issuing the LogInRsp to us.
+     * Protocol-negotiation occurs *here*, before any further fields are interpreted. */
+    const auto proto_neg_root = log_in_rsp_root.getProtocolNegotiationToClient();
+    m_protocol_negotiator.compute_negotiated_proto_ver(proto_neg_root.getMaxProtoVer(), &err_code);
+    if (!err_code)
     {
-      FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, and it is "
-                       "the expected LogInRsp message; but this side passed null container for "
-                       "init-channels-by-srv-request, while server indicates it will open "
-                       "[" << n_init_channels_by_srv_req << "] of them -- this or other side misbehaved?  "
-                       "Will go back to NULL state and report to user via on-async-connect handler.");
-      err_code = error::Code::S_INVALID_ARGUMENT;
-    }
-    else // if (n_init_channels_by_srv_req is fine)
-    {
-      auto cli_namespace_mv = Shared_name::ct(string(log_in_rsp_root.getClientNamespace()));
-      if (cli_namespace_mv.empty() || (cli_namespace_mv == Shared_name::S_SENTINEL))
+      m_protocol_negotiator_aux.compute_negotiated_proto_ver(proto_neg_root.getMaxProtoVerAux(), &err_code);
+      if (!err_code)
       {
-        FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, and it "
-                         "is the expected LogInRsp message; but the cli-namespace [" << cli_namespace_mv << "] therein "
-                         "is illegal -- other side misbehaved?  Will go back to NULL "
-                         "state and report to user via on-async-connect handler.");
-        err_code = error::Code::S_CLIENT_MASTER_LOG_IN_RESPONSE_BAD;
-      }
-      else // if (all good)
-      {
-        Base::set_cli_namespace(std::move(cli_namespace_mv));
-        // cli_namespace_mv is now hosed.
+        /* As of this writing there is only protocol version 1.  In the future, if we add more versions *and*
+         * decide to be backwards-compatible with older versions, then this is the point from which one knows
+         * which protocol-version to speak (query m_protocol_negotiator.negotiated_proto_ver(); other Session
+         * hierarchies can query m_protocol_negotiator_aux.<same>()). */
 
-        // All is cool; can compute this now.
-        n_init_channels = n_init_channels_by_srv_req + (init_channels_by_cli_req_pre_sized
-                                                          ? init_channels_by_cli_req_pre_sized->size()
-                                                          : 0);
-
-        FLOW_LOG_INFO("Client session [" << *this << "]: Session-connect request: Log-in response received, and it is "
-                      "the expected LogInRsp message; cli-namespace [" << Base::cli_namespace() << "] received and "
-                      "saved.  Init-channel count expected is [" << n_init_channels << "]; of these "
-                      "[" << n_init_channels_by_srv_req << "] requested by opposing server.  "
-                      "If 0: Will go to PEER state and report to user via on-async-connect handler.  "
-                      "Else: Will await that many open-channel-to-client requests with the init-channel info.");
-
-        if (mdt_from_srv_or_null)
+        const auto n_init_channels_by_srv_req = log_in_rsp_root.getNumInitChannelsBySrvReq();
+        if ((n_init_channels_by_srv_req != 0) && (!init_channels_by_srv_req))
         {
-          /* They're interested in the metadata from server; we can now fish it out (but only set *mdt_from_srv_or_null
-           * when invoking handler on success as promised; untouched otherwise as promised).  So prepare the result.
-           *
-           * Use the same technique as when emitting `mdt` in on_master_channel_open_channel_req(); omitting cmnts. */
-          struct Rsp_and_mdt_reader
+          FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, and it is "
+                           "the expected LogInRsp message; but this side passed null container for "
+                           "init-channels-by-srv-request, while server indicates it will open "
+                           "[" << n_init_channels_by_srv_req << "] of them -- this or other side misbehaved?  "
+                           "Will go back to NULL state and report to user via on-async-connect handler.");
+          err_code = error::Code::S_INVALID_ARGUMENT;
+        }
+        else // if (n_init_channels_by_srv_req is fine)
+        {
+          auto cli_namespace_mv = Shared_name::ct(string(log_in_rsp_root.getClientNamespace()));
+          if (cli_namespace_mv.empty() || (cli_namespace_mv == Shared_name::S_SENTINEL))
           {
-            typename Mdt_reader_ptr::element_type m_mdt_reader;
-            typename Master_structured_channel::Msg_in_ptr m_rsp;
-          };
-          shared_ptr<Rsp_and_mdt_reader> rsp_and_mdt(new Rsp_and_mdt_reader
-                                                           { log_in_rsp_root.getMetadata(),
-                                                              std::move(log_in_rsp) });
-          // (log_in_rsp is now hosed.)
-          mdt_from_srv = Mdt_reader_ptr(std::move(rsp_and_mdt), &rsp_and_mdt->m_mdt_reader);
-        } // if (mdt_from_srv_or_null)
-        // else if (!mdt_from_srv_or_null) { Leave mdt_from_srv null too. }
-      } // if (all good, continue on path to PEER state)
-    } // else if (n_init_channels_by_srv_req is fine) (but err_code may have become truthy inside)
+            FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, and it "
+                             "is the expected LogInRsp message; but the cli-namespace [" << cli_namespace_mv << "] therein "
+                             "is illegal -- other side misbehaved?  Will go back to NULL "
+                             "state and report to user via on-async-connect handler.");
+            err_code = error::Code::S_CLIENT_MASTER_LOG_IN_RESPONSE_BAD;
+          }
+          else // if (all good)
+          {
+            Base::set_cli_namespace(std::move(cli_namespace_mv));
+            // cli_namespace_mv is now hosed.
+
+            // All is cool; can compute this now.
+            n_init_channels = n_init_channels_by_srv_req + (init_channels_by_cli_req_pre_sized
+                                                              ? init_channels_by_cli_req_pre_sized->size()
+                                                              : 0);
+
+            FLOW_LOG_INFO("Client session [" << *this << "]: Session-connect request: Log-in response received, and it is "
+                          "the expected LogInRsp message; cli-namespace [" << Base::cli_namespace() << "] received and "
+                          "saved.  Init-channel count expected is [" << n_init_channels << "]; of these "
+                          "[" << n_init_channels_by_srv_req << "] requested by opposing server.  "
+                          "If 0: Will go to PEER state and report to user via on-async-connect handler.  "
+                          "Else: Will await that many open-channel-to-client requests with the init-channel info.");
+
+            if (mdt_from_srv_or_null)
+            {
+              /* They're interested in the metadata from server; we can now fish it out (but only set *mdt_from_srv_or_null
+               * when invoking handler on success as promised; untouched otherwise as promised).  So prepare the result.
+               *
+               * Use the same technique as when emitting `mdt` in on_master_channel_open_channel_req(); omitting cmnts. */
+              struct Rsp_and_mdt_reader
+              {
+                typename Mdt_reader_ptr::element_type m_mdt_reader;
+                typename Master_structured_channel::Msg_in_ptr m_rsp;
+              };
+              shared_ptr<Rsp_and_mdt_reader> rsp_and_mdt(new Rsp_and_mdt_reader
+                                                               { log_in_rsp_root.getMetadata(),
+                                                                  std::move(log_in_rsp) });
+              // (log_in_rsp is now hosed.)
+              mdt_from_srv = Mdt_reader_ptr(std::move(rsp_and_mdt), &rsp_and_mdt->m_mdt_reader);
+            } // if (mdt_from_srv_or_null)
+            // else if (!mdt_from_srv_or_null) { Leave mdt_from_srv null too. }
+          } // if (all good, continue on path to PEER state)
+        } // else if (n_init_channels_by_srv_req is fine) (but err_code may have become truthy inside)
+      } // else if (!err_code from m_protocol_negotiator_aux.compute_negotiated_proto_ver()) (ditto re. err_code)
+    } // else if (!err_code from m_protocol_negotiator.compute_negotiated_proto_ver()) (ditto re. err_code)
   } // if (isLogInRsp())
 
   assert((m_state == State::S_CONNECTING)

@@ -20,6 +20,7 @@
 
 #include "ipc/session/detail/session_base.hpp"
 #include "ipc/session/error.hpp"
+#include "ipc/transport/protocol_negotiator.hpp"
 
 namespace ipc::session
 {
@@ -564,6 +565,27 @@ private:
   // Data.
 
   /**
+   * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
+   * the vanilla ipc::session `Session` hierarchy.  Reset essentially at start of each async_connect().
+   *
+   * Outgoing-direction state is touched when assembling `LogInReq` to send to opposing `Server_session`.
+   * Incoming-direction state is touched/verified at the start of interpreting `LogInRsp` receiver from there.
+   *
+   * @see transport::Protocol_negotiator doc header for key background on the topic.
+   */
+  transport::Protocol_negotiator m_protocol_negotiator;
+
+  /**
+   * Analogous to #m_protocol_negotiator but pertains to algorithms perpetuated by (if relevant)
+   * non-vanilla ipc::session `Session` hierarchy implemented on top of our vanilla ipc::session `Session` hierarchy.
+   * For example, ipc::session::shm hierarchies can use this to version whatever additional protocol is required
+   * to establish SHM things.
+   *
+   * @see transport::Protocol_negotiator doc header for key background on the topic.
+   */
+  transport::Protocol_negotiator m_protocol_negotiator_aux;
+
+  /**
    * The `on_done_func` argument to async_accept_log_in(); `.empty()` except while the (at most one, ever)
    * async_accept_log_in() is outstanding.  In other words it is assigned at entry at async_accept_log_in()
    * and `.clear()`ed upon being invoked, indicating either success or failure of the log-in.  Reminder:
@@ -643,6 +665,12 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
                                             transport::sync_io::Native_socket_stream&& master_channel_sock_stm) :
   Base(srv_app_ref),
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
+
+  /* Initial protocol = 1!
+   * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
+   *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
+  m_protocol_negotiator(get_logger(), flow::util::ostream_op_string("srv-sess-", *this), 1, 1),
+  m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string("srv-sess-aux-", *this), 1, 1),
 
   m_master_sock_stm(std::move(master_channel_sock_stm)),
   m_last_passively_opened_channel_id(0),
@@ -1645,219 +1673,242 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
 
         Error_code err_code; // A few things can go wrong below; start with success assumption.
 
-        auto msg_root = log_in_req->body_root().getLogInReq();
+        const auto msg_root = log_in_req->body_root().getLogInReq();
         // (Initialize to avoid -- incorrect -- warning.)
         size_t n_init_channels = 0; // If successful log-in (so far) set this to how many init channels we'll open.
         size_t n_init_channels_by_cli_req = 0;
         Mdt_reader_ptr mdt_from_cli; // If successful log-in (so far) set this to eventual *mdt_from_cli_or_null result.
 
-        if ((msg_root.getShmTypeOrNone() != S_SHM_TYPE)
-            || (msg_root.getMqTypeOrNone() != S_MQ_TYPE_OR_NONE)
-            || (msg_root.getNativeHandleTransmissionEnabled() != S_TRANSMIT_NATIVE_HANDLES))
+        /* Please see "Protocol negotiation" in Client_session_impl class doc header for discussion; and notes in the
+         * schema .capnp file around ProtocolNegotiation-typed fields.
+         *
+         * Protocol-negotiation occurs *here*, before any further fields are interpreted. */
+        const auto proto_neg_root = msg_root.getProtocolNegotiationToServer();
+        m_protocol_negotiator.compute_negotiated_proto_ver(proto_neg_root.getMaxProtoVer(), &err_code);
+        if (!err_code)
         {
-          FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received; "
-                           "but client desired process SHM/channel config (SHM-type "
-                           "[" << int(msg_root.getShmTypeOrNone()) << "], MQ-type "
-                           "[" << int(msg_root.getMqTypeOrNone()) << "], transmit-native-handles? = "
-                           "[" << msg_root.getNativeHandleTransmissionEnabled() << "]) "
-                           "does not match our local config ([" << int(S_SHM_TYPE) << '/'
-                           << int(S_MQ_TYPE_OR_NONE) << '/' << S_TRANSMIT_NATIVE_HANDLES << "]).  "
-                           "Perhaps the other side used Client_session variant class not matching local "
-                           "Server_session variant class and/or different template parameters.  "
-                           "Closing session master channel and reporting to user via on-accept-log-in handler.");
-          err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CONFIG_MISMATCH;
-        } // if (msg_root.shmType, mqType, ... are not OK)
-        else // if (msg_root.shmType, mqType, ... are OK)
-        {
-          n_init_channels_by_cli_req = msg_root.getNumInitChannelsByCliReq();
-          if ((n_init_channels_by_cli_req != 0) && (!init_channels_by_cli_req))
+          m_protocol_negotiator_aux.compute_negotiated_proto_ver(proto_neg_root.getMaxProtoVerAux(), &err_code);
+          if (!err_code)
           {
-            FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received; "
-                             "but this side passed null container for "
-                             "init-channels-by-cli-request, while client indicates it will open "
-                             "[" << n_init_channels_by_cli_req << "] of them -- this or other side misbehaved?  "
-                             "Closing session master channel and reporting to user via on-accept-log-in handler.");
-            err_code = error::Code::S_INVALID_ARGUMENT;
-          }
-          else // if (n_init_channels_by_cli_req is OK)
-          {
-            /* @todo We are assuming good-faith here about the message's contents; should probably be more paranoid for
-             * consistency regarding, like, a null claimed_own_proc_creds.  Change assert() to a real error maybe,
-             * etc. */
-            assert(msg_root.hasClaimedOwnProcessCredentials());
+            /* As of this writing there is only protocol version 1.  In the future, if we add more versions *and*
+             * decide to be backwards-compatible with older versions, then this is the point from which one knows
+             * which protocol-version to speak (query m_protocol_negotiator.negotiated_proto_ver(); other Session
+             * hierarchies can query m_protocol_negotiator_aux.<same>()). */
 
-            auto claimed_proc_creds_root = msg_root.getClaimedOwnProcessCredentials();
-            const Process_credentials claimed_proc_creds(claimed_proc_creds_root.getProcessId(),
-                                                         claimed_proc_creds_root.getUserId(),
-                                                         claimed_proc_creds_root.getGroupId());
-
-            const string cli_app_name(msg_root.getOwnApp().getName());
-            const Client_app* const cli_app_ptr_or_null = cli_app_lookup_func(cli_app_name);
-
-            if ((!cli_app_ptr_or_null) ||
-                (!flow::util::key_exists(Base::m_srv_app_ref.m_allowed_client_apps, cli_app_name)))
+            if ((msg_root.getShmTypeOrNone() != S_SHM_TYPE)
+                || (msg_root.getMqTypeOrNone() != S_MQ_TYPE_OR_NONE)
+                || (msg_root.getNativeHandleTransmissionEnabled() != S_TRANSMIT_NATIVE_HANDLES))
             {
-              FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
-                               "client process creds [" << claimed_proc_creds << "], "
-                               "OS-reported client process creds [" << os_proc_creds << "], "
-                               "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                               "cli-app-name [" << cli_app_name << "]); but the latter is unknown or not in the "
-                               "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
+              FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received; "
+                               "but client desired process SHM/channel config (SHM-type "
+                               "[" << int(msg_root.getShmTypeOrNone()) << "], MQ-type "
+                               "[" << int(msg_root.getMqTypeOrNone()) << "], transmit-native-handles? = "
+                               "[" << msg_root.getNativeHandleTransmissionEnabled() << "]) "
+                               "does not match our local config ([" << int(S_SHM_TYPE) << '/'
+                               << int(S_MQ_TYPE_OR_NONE) << '/' << S_TRANSMIT_NATIVE_HANDLES << "]).  "
+                               "Perhaps the other side used Client_session variant class not matching local "
+                               "Server_session variant class and/or different template parameters.  "
                                "Closing session master channel and reporting to user via on-accept-log-in handler.");
-              err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CLIENT_APP_DISALLOWED_OR_UNKNOWN;
-            }
-            else // if (cli_app_ptr_or_null)
+              err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CONFIG_MISMATCH;
+            } // if (msg_root.shmType, mqType, ... are not OK)
+            else // if (msg_root.shmType, mqType, ... are OK)
             {
-              Base::set_cli_app_ptr(cli_app_ptr_or_null);
-
-              /* Nice, the other side's Client_app is valid and allowed.  Run safety checks on the claimed_proc_creds;
-               * they must reconfirm the Client_app they mean is the Client_app we know by checking for consistency
-               * of the values against our Client_app config; plus ensure consistency by checking gainst the OS-reported
-               * values (in case it's some kind snafu or spoofing or who knows). */
-              if ((claimed_proc_creds != os_proc_creds)
-                  || (Base::cli_app_ptr()->m_exec_path.string() != os_proc_invoked_as)
-                  || (Base::cli_app_ptr()->m_user_id != claimed_proc_creds.user_id())
-                  || (Base::cli_app_ptr()->m_group_id != claimed_proc_creds.group_id()))
+              n_init_channels_by_cli_req = msg_root.getNumInitChannelsByCliReq();
+              if ((n_init_channels_by_cli_req != 0) && (!init_channels_by_cli_req))
               {
-                FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
-                                 "client process creds [" << claimed_proc_creds << "], "
-                                 "OS-reported client process creds [" << os_proc_creds << "], "
-                                 "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                 "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
-                                 "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
-                                 "However the aforementioned process creds (UID:GID) do not match "
-                                 "the aforementioned locally-configured client-app values UID:GID; and/or "
-                                 "the claimed creds (UID:GID, PID) do not match the OS-reported one from the stream; "
-                                 "and/or OS-reported invoked-as name does not *exactly* match client-app exec path.  "
-                                 "For safety: Closing session master channel and reporting to user via "
-                                 "on-accept-log-in handler.");
-                err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CLIENT_APP_INCONSISTENT_CREDS;
+                FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received; "
+                                 "but this side passed null container for "
+                                 "init-channels-by-cli-request, while client indicates it will open "
+                                 "[" << n_init_channels_by_cli_req << "] of them -- this or other side misbehaved?  "
+                                 "Closing session master channel and reporting to user via on-accept-log-in handler.");
+                err_code = error::Code::S_INVALID_ARGUMENT;
               }
-              else // if (creds are consistent)
+              else // if (n_init_channels_by_cli_req is OK)
               {
-                // Even nicer, the Client_app is totally correct.  So we can do this to ~complete Session_base stuff.
-                Base::set_cli_namespace(cli_namespace_func());
+                /* @todo We are assuming good-faith here about the message's contents; should probably be more paranoid for
+                 * consistency regarding, like, a null claimed_own_proc_creds.  Change assert() to a real error maybe,
+                 * etc. */
+                assert(msg_root.hasClaimedOwnProcessCredentials());
 
-                // As promised run the setup thing just before sending the success response to opposing client.
+                auto claimed_proc_creds_root = msg_root.getClaimedOwnProcessCredentials();
+                const Process_credentials claimed_proc_creds(claimed_proc_creds_root.getProcessId(),
+                                                             claimed_proc_creds_root.getUserId(),
+                                                             claimed_proc_creds_root.getGroupId());
 
-                assert(!err_code);
-                if ((err_code = pre_rsp_setup_func()))
+                const string cli_app_name(msg_root.getOwnApp().getName());
+                const Client_app* const cli_app_ptr_or_null = cli_app_lookup_func(cli_app_name);
+
+                if ((!cli_app_ptr_or_null) ||
+                    (!flow::util::key_exists(Base::m_srv_app_ref.m_allowed_client_apps, cli_app_name)))
                 {
                   FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
                                    "client process creds [" << claimed_proc_creds << "], "
                                    "OS-reported client process creds [" << os_proc_creds << "], "
                                    "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                   "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
+                                   "cli-app-name [" << cli_app_name << "]); but the latter is unknown or not in the "
                                    "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
-                                   "Everything matches.  However the per-app setup code yielded error "
-                                   "(details above).  Giving up; will not send log-in response.  "
-                                   "Closing session master channel and reporting to user via "
-                                   "on-accept-log-in handler.");
+                                   "Closing session master channel and reporting to user via on-accept-log-in handler.");
+                  err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CLIENT_APP_DISALLOWED_OR_UNKNOWN;
                 }
-                else // if (!(err_code = pre_rsp_setup_func()))
+                else // if (cli_app_ptr_or_null)
                 {
-                  /* Cool then.  We can send the log-in response.  Now is a great time to 1, fish out the
-                   * cli->srv metadata (to pass set out-arg to before successful user-handler execution);
-                   * 2, ask local user (via in-arg function) how many channels it wants opened (they need
-                   * various cli->srv info to make this decision); 3, compute srv->cli metadata
-                   * (they need... ditto).  This stuff cannot fail. */
+                  Base::set_cli_app_ptr(cli_app_ptr_or_null);
 
-                  // Firstly: the cli->srv metadata.
-                  const auto log_in_req_saved = log_in_req.get(); // It'll get move()d away below; save it.
+                  /* Nice, the other side's Client_app is valid and allowed.  Run safety checks on the claimed_proc_creds;
+                   * they must reconfirm the Client_app they mean is the Client_app we know by checking for consistency
+                   * of the values against our Client_app config; plus ensure consistency by checking gainst the OS-reported
+                   * values (in case it's some kind snafu or spoofing or who knows). */
+                  if ((claimed_proc_creds != os_proc_creds)
+                      || (Base::cli_app_ptr()->m_exec_path.string() != os_proc_invoked_as)
+                      || (Base::cli_app_ptr()->m_user_id != claimed_proc_creds.user_id())
+                      || (Base::cli_app_ptr()->m_group_id != claimed_proc_creds.group_id()))
                   {
-                    /* Only set *mdt_from_cli_or_null when invoking handler on success as promised; untouched otherwise
-                     * as promised.  Use the same technique as when emitting `mdt` in
-                     * on_master_channel_open_channel_req(); omitting comments. */
-                    struct Req_and_mdt_reader
-                    {
-                      typename Mdt_reader_ptr::element_type m_mdt_reader;
-                      typename Master_structured_channel::Msg_in_ptr m_req;
-                    };
-                    shared_ptr<Req_and_mdt_reader> req_and_mdt(new Req_and_mdt_reader
-                                                                     { msg_root.getMetadata(),
-                                                                       std::move(log_in_req) });
-                    // (log_in_req is now hosed.)
-                    mdt_from_cli = Mdt_reader_ptr(std::move(req_and_mdt), &req_and_mdt->m_mdt_reader);
-                  } // {}
-
-                  // Secondly: n_init_channels (we have n_init_channels_by_cli_req; now add the local count).
-                  n_init_channels = n_init_channels_by_cli_req;
-                  if (init_channels_by_srv_req)
-                  {
-                    n_init_channels += n_init_channels_by_srv_req_func(*(Base::cli_app_ptr()),
-                                                                       n_init_channels_by_cli_req,
-                                                                       Mdt_reader_ptr(mdt_from_cli));
-                  }
-
-                  // Thirdly: srv->cli metadata.  This goes inside LogInRsp; so create that now.
-                  auto log_in_rsp_msg = m_master_channel->create_msg();
-                  auto log_in_rsp_root = log_in_rsp_msg.body_root()->initLogInRsp();
-                  auto mdt_from_srv_root = log_in_rsp_root.initMetadata();
-                  // And let them fill it out.
-                  mdt_load_func(*(Base::cli_app_ptr()), n_init_channels_by_cli_req, Mdt_reader_ptr(mdt_from_cli),
-                                &mdt_from_srv_root); // They load this (if they want).
-
-                  // Now we can send the log-in response finally.
-
-                  log_in_rsp_root.setClientNamespace(Base::cli_namespace().str());
-                  log_in_rsp_root.setNumInitChannelsBySrvReq(n_init_channels - n_init_channels_by_cli_req);
-
-                  assert(!err_code);
-                  if (!m_master_channel->send(log_in_rsp_msg, log_in_req_saved, &err_code))
-                  {
-                    /* The docs say send() returns false if:
-                     * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
-                     * via on-error handler; async_end_sending() has already been called."  Only the middle one is
-                     * possible in our case.  on_master_channel_error() shall issue m_log_in_on_done_func(truthy) in
-                     * our stead. */
-                    FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
-                                   "catch it shortly or has already caught it.");
-                    return;
-                  }
-                  // else either it succeeded (err_code still falsy); or it failed (truthy now).
-
-                  if (err_code)
-                  {
-                    FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received "
-                                     "(claimed client process creds [" << claimed_proc_creds << "], "
+                    FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
+                                     "client process creds [" << claimed_proc_creds << "], "
                                      "OS-reported client process creds [" << os_proc_creds << "], "
                                      "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                     "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in "
+                                     "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
                                      "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
-                                     "Init-channel count expected is [" << n_init_channels << "]; of these "
-                                     "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
-                                     "Everything matches.  "
-                                     "Log-in response (including saved cli-namespace "
-                                     "[" << Base::cli_namespace() << "] and filled-out srv->cli metadata) "
-                                     "send attempted, but the send failed (details above).  "
-                                     "Closing session master channel and reporting to user via "
+                                     "However the aforementioned process creds (UID:GID) do not match "
+                                     "the aforementioned locally-configured client-app values UID:GID; and/or "
+                                     "the claimed creds (UID:GID, PID) do not match the OS-reported one from the stream; "
+                                     "and/or OS-reported invoked-as name does not *exactly* match client-app exec path.  "
+                                     "For safety: Closing session master channel and reporting to user via "
                                      "on-accept-log-in handler.");
+                    err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CLIENT_APP_INCONSISTENT_CREDS;
                   }
-                  else // if (!err_code)
+                  else // if (creds are consistent)
                   {
-                    // Excellent.  m_master_channel auto-proceeds to logged-in phase on successful send().
-                    FLOW_LOG_INFO("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
-                                  "client process creds [" << claimed_proc_creds << "], "
-                                  "OS-reported client process creds [" << os_proc_creds << "], "
-                                  "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                  "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
-                                  "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
-                                  "Everything matches.  "
-                                  "Log-in response, including saved cli-namespace [" << Base ::cli_namespace() << "], "
-                                  "sent OK.  "
-                                  "Init-channel count expected is [" << n_init_channels << "]; of these "
-                                  "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
-                                  "If 0: Will go to almost-PEER state and report to user via on-accept-log-in "
-                                  "handler (user must then invoke init_handlers() on the Server_session to reach PEER "
-                                  "state).  "
-                                  "Else: Will send that many open-channel-to-client requests with the init-channel "
-                                  "info; and await one ack in return.");
-                  } // else if (!err_code from send())
-                } // else if (!(err_code = pre_rsp_setup_func())) (err_code might have become truthy inside though)
-              } // else if (creds are consistent) (ditto re. err_code)
-            } // else if (cli_app_ptr_or_null) (ditto re. err_code)
-          } // else if (n_init_channels_by_cli_req is OK) (ditto re. err_code)
-        } // else if (msg_root.getShmTypeOrNone() == S_SHM_TYPE_OR_NONE) (ditto re. err_code)
+                    // Even nicer, the Client_app is totally correct.  So we can do this to ~complete Session_base stuff.
+                    Base::set_cli_namespace(cli_namespace_func());
+
+                    // As promised run the setup thing just before sending the success response to opposing client.
+
+                    assert(!err_code);
+                    if ((err_code = pre_rsp_setup_func()))
+                    {
+                      FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
+                                       "client process creds [" << claimed_proc_creds << "], "
+                                       "OS-reported client process creds [" << os_proc_creds << "], "
+                                       "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
+                                       "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
+                                       "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
+                                       "Everything matches.  However the per-app setup code yielded error "
+                                       "(details above).  Giving up; will not send log-in response.  "
+                                       "Closing session master channel and reporting to user via "
+                                       "on-accept-log-in handler.");
+                    }
+                    else // if (!(err_code = pre_rsp_setup_func()))
+                    {
+                      /* Cool then.  We can send the log-in response.  Now is a great time to 1, fish out the
+                       * cli->srv metadata (to pass set out-arg to before successful user-handler execution);
+                       * 2, ask local user (via in-arg function) how many channels it wants opened (they need
+                       * various cli->srv info to make this decision); 3, compute srv->cli metadata
+                       * (they need... ditto).  This stuff cannot fail. */
+
+                      // Firstly: the cli->srv metadata.
+                      const auto log_in_req_saved = log_in_req.get(); // It'll get move()d away below; save it.
+                      {
+                        /* Only set *mdt_from_cli_or_null when invoking handler on success as promised; untouched otherwise
+                         * as promised.  Use the same technique as when emitting `mdt` in
+                         * on_master_channel_open_channel_req(); omitting comments. */
+                        struct Req_and_mdt_reader
+                        {
+                          typename Mdt_reader_ptr::element_type m_mdt_reader;
+                          typename Master_structured_channel::Msg_in_ptr m_req;
+                        };
+                        shared_ptr<Req_and_mdt_reader> req_and_mdt(new Req_and_mdt_reader
+                                                                         { msg_root.getMetadata(),
+                                                                           std::move(log_in_req) });
+                        // (log_in_req is now hosed.)
+                        mdt_from_cli = Mdt_reader_ptr(std::move(req_and_mdt), &req_and_mdt->m_mdt_reader);
+                      } // {}
+
+                      // Secondly: n_init_channels (we have n_init_channels_by_cli_req; now add the local count).
+                      n_init_channels = n_init_channels_by_cli_req;
+                      if (init_channels_by_srv_req)
+                      {
+                        n_init_channels += n_init_channels_by_srv_req_func(*(Base::cli_app_ptr()),
+                                                                           n_init_channels_by_cli_req,
+                                                                           Mdt_reader_ptr(mdt_from_cli));
+                      }
+
+                      // Thirdly: srv->cli metadata.  This goes inside LogInRsp; so create that now.
+                      auto log_in_rsp_msg = m_master_channel->create_msg();
+                      auto log_in_rsp_root = log_in_rsp_msg.body_root()->initLogInRsp();
+                      auto mdt_from_srv_root = log_in_rsp_root.initMetadata();
+                      // And let them fill it out.
+                      mdt_load_func(*(Base::cli_app_ptr()), n_init_channels_by_cli_req, Mdt_reader_ptr(mdt_from_cli),
+                                    &mdt_from_srv_root); // They load this (if they want).
+
+                      // Now we can send the log-in response finally.
+
+                      // Similarly to Client_session_impl: give them our version info, so they can verify, as we did.
+                      auto proto_neg_root = log_in_rsp_root.initProtocolNegotiationToClient();
+                      proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
+                      proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
+
+                      log_in_rsp_root.setClientNamespace(Base::cli_namespace().str());
+                      log_in_rsp_root.setNumInitChannelsBySrvReq(n_init_channels - n_init_channels_by_cli_req);
+
+                      assert(!err_code);
+                      if (!m_master_channel->send(log_in_rsp_msg, log_in_req_saved, &err_code))
+                      {
+                        /* The docs say send() returns false if:
+                         * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
+                         * via on-error handler; async_end_sending() has already been called."  Only the middle one is
+                         * possible in our case.  on_master_channel_error() shall issue m_log_in_on_done_func(truthy) in
+                         * our stead. */
+                        FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
+                                       "catch it shortly or has already caught it.");
+                        return;
+                      }
+                      // else either it succeeded (err_code still falsy); or it failed (truthy now).
+
+                      if (err_code)
+                      {
+                        FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received "
+                                         "(claimed client process creds [" << claimed_proc_creds << "], "
+                                         "OS-reported client process creds [" << os_proc_creds << "], "
+                                         "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
+                                         "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in "
+                                         "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
+                                         "Init-channel count expected is [" << n_init_channels << "]; of these "
+                                         "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
+                                         "Everything matches.  "
+                                         "Log-in response (including saved cli-namespace "
+                                         "[" << Base::cli_namespace() << "] and filled-out srv->cli metadata) "
+                                         "send attempted, but the send failed (details above).  "
+                                         "Closing session master channel and reporting to user via "
+                                         "on-accept-log-in handler.");
+                      }
+                      else // if (!err_code)
+                      {
+                        // Excellent.  m_master_channel auto-proceeds to logged-in phase on successful send().
+                        FLOW_LOG_INFO("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
+                                      "client process creds [" << claimed_proc_creds << "], "
+                                      "OS-reported client process creds [" << os_proc_creds << "], "
+                                      "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
+                                      "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
+                                      "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
+                                      "Everything matches.  "
+                                      "Log-in response, including saved cli-namespace [" << Base ::cli_namespace() << "], "
+                                      "sent OK.  "
+                                      "Init-channel count expected is [" << n_init_channels << "]; of these "
+                                      "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
+                                      "If 0: Will go to almost-PEER state and report to user via on-accept-log-in "
+                                      "handler (user must then invoke init_handlers() on the Server_session to reach PEER "
+                                      "state).  "
+                                      "Else: Will send that many open-channel-to-client requests with the init-channel "
+                                      "info; and await one ack in return.");
+                      } // else if (!err_code from send())
+                    } // else if (!(err_code = pre_rsp_setup_func())) (err_code might have become truthy inside though)
+                  } // else if (creds are consistent) (ditto re. err_code)
+                } // else if (cli_app_ptr_or_null) (ditto re. err_code)
+              } // else if (n_init_channels_by_cli_req is OK) (ditto re. err_code)
+            } // else if (msg_root.getShmTypeOrNone() == S_SHM_TYPE_OR_NONE) (ditto re. err_code)
+          } // else if (!err_code from m_protocol_negotiator_aux.compute_negotiated_proto_ver()) (ditto re. err_code)
+        } // else if (!err_code from m_protocol_negotiator.compute_negotiated_proto_ver()) (ditto re. err_code)
 
         // Whew.  OK then.  Did we pass the gauntlet?
 

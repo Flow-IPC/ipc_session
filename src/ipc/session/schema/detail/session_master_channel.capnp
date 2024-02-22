@@ -64,6 +64,7 @@ using Size = Common.Size;
 using MqType = SessionCommon.MqType;
 using ShmType = SessionCommon.ShmType;
 using ProcessCredentials = SessionCommon.ProcessCredentials;
+using ProtoVer = Int16; # Isomorphic to `Protocol_version::proto_ver_t`.  See discussion in its doc header.
 
 using ClientNamespace = Text;
 # String identifying, uniquely within a given half-session (i.e., IPC-active server-app instance (process)),
@@ -138,22 +139,39 @@ struct LogInReq(MetadataPayload)
   #
   # As noted above the following 2 knobs, as of this writing, are for verification purposes only.
 
-  mqTypeOrNone @0 :MqType;
+  protocolNegotiationToServer @0 :ProtocolNegotiation;
+  # Protocol capability information that client is advertising about itself to server.
+  # Upon receiving the LogInReq, server -- before processing any further fields -- ensures that it supports
+  # min(<this>, <its own preferred (highest) version>) (for each layer in ProtocolNegotiation).  If so, continue.
+  # If not, close session immediately (protocol negotiation failed: they don't speak a common tongue).
+  # Since we have a SYN/SYN_ACK exchange built-in to the protocol from the get-go, we piggy-back (piggy-front?)
+  # this exchange of info onto that exchange.  Hence when LogInRsp responds with similar info, the client
+  # performs a similar check (and, similarly, closes session if protocol negotiation fails on its side).
+  #
+  # That said: As of this writing there is only version 1, so everything else is simple.  If/when there is a version 2+,
+  # *and* *if* client-side software wants to attempt to support backwards compatibility (meaning speaking more than 1
+  # version, the highest/preferred one it knows), then the future additions -- if any! -- to LogInReq must
+  # be quite carefully managed: at the time of creating LogInReq, the client does not yet know of the server's
+  # capabilities, and therefore does not know which protocol-version it should speak.  Hence it needs to send stuff
+  # supported by all server versions that could possibly speak to it (in LogInReq specifically).  After LogInRsp
+  # is received and verified, the client can zero in on the exact version to speak (or explode the channel/session).
+
+  mqTypeOrNone @1 :MqType;
   # Verified knob: Is an MQ pipe enabled (if not then `none`); if so its type (`posix`, `bipc`, whatever).
 
-  nativeHandleTransmissionEnabled @1 :Bool;
+  nativeHandleTransmissionEnabled @2 :Bool;
   # Verified knob: Is it, in addition to a message, possible to pair it with a native socket?
 
-  claimedOwnProcessCredentials @2 :ProcessCredentials;
+  claimedOwnProcessCredentials @3 :ProcessCredentials;
   # Client's own PID/UID/GID reported by application level.  At least compared to OS-reported values from connection if
   # possible; discrepancy means disconnect (log-in fail).
 
-  ownApp @3 :ClientApp;
+  ownApp @4 :ClientApp;
   # Client's application information.  At least compared to centrally configured values that list all possible
   # client applications and their details; discrepancy means disconnect (log-in fail) -- as does attempt of client
   # app X to connect to server app Y, when no such conversation is centrally configured as valid.
 
-  shmTypeOrNone @4 :ShmType;
+  shmTypeOrNone @5 :ShmType;
   # ipc::session-created `Session`s are optionally SHM-enabled (this is specified at compile time: one can use
   # either just a, e.g., Client_session; or a shm::classic::Client_session which is identical but adds
   # construction/GC/transmission APIs for various SHM scopes); this is the client's declared intention to
@@ -171,12 +189,12 @@ struct LogInReq(MetadataPayload)
   #     to client in LogInRsp).
   #   - jemalloc: Client shall expect 1 JemallocShmSetup message.  See below.
 
-  metadata @5 :Metadata(MetadataPayload);
+  metadata @6 :Metadata(MetadataPayload);
   # Metadata similar to OpenChannel*Req.metadata.  There is an opposite-facing LogInRsp.metadata also.
   # These could be used to describe the numInitChannelsByCliReq channels we want opened on our behalf;
   # or really any other at-session-open information.
 
-  numInitChannelsByCliReq @6 :Size;
+  numInitChannelsByCliReq @7 :Size;
   # Client is requesting this many channels (possibly 0) to be opened on its behalf and returned
   # as the init_channels_by_cli_req set (to the on-session-opened-OK handler, on each side).
   # LogInRsp.numInitChannelsBySrvReq is similar from the server side.
@@ -192,12 +210,17 @@ struct LogInRsp(MetadataPayload)
   # Response to LogInReq.  If received then log-in successful.  If channel closed instead the unsuccessful.
   # TODO: Consider adding failed LogInRsp variant with reason code a-la OpenChannelResult.
 
-  clientNamespace @0 :ClientNamespace;
+  protocolNegotiationToClient @0 :ProtocolNegotiation;
+  # Identical stuff to LogInReq.protocolNegotiationToServer -- see that guy.
+  # So assuming server is happy and sends LogInRsp, client performs identical check on these data.
+  # If it's not happy (even though server was, hence why it even responses with LogInRsp), *it* closes session.
 
-  metadata @1 :Metadata(MetadataPayload);
+  clientNamespace @1 :ClientNamespace;
+
+  metadata @2 :Metadata(MetadataPayload);
   # See LogInRsp.  Symmetrical thing but srv->cli.
 
-  numInitChannelsBySrvReq @2 :Size;
+  numInitChannelsBySrvReq @3 :Size;
   # See LogInRsp.  Symmetrical to numInitChannelsByCliReq but srv->cli.
   # Returned on each side as init_channels_by_srv_req.
 }
@@ -307,4 +330,14 @@ struct OpenChannelToServerRsp
   # Ignore if not `accepted` above.
   serverToClientMqAbsNameOrEmpty @2 :SharedName;
   # Ignore if not `accepted` above.
+}
+
+struct ProtocolNegotiation
+{
+  # Conceptually (and as of this writing in every detail) identical to the one in structured_msg.capnp.
+  # Since they are separate protocol layers, it seemed prudent not to reuse the one in structured_msg.capnp,
+  # in case we need to expand/modify/? one or the other.
+
+  maxProtoVer @0 :ProtoVer;
+  maxProtoVerAux @1 :ProtoVer;
 }
