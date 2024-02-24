@@ -79,7 +79,7 @@ function(generate_custom_srcs)
     # exported yet: we are within `make` (or equivalent), not past any `make install`, so
     # any `import` in a .capnp of ours (in CAPNP_SCHEMAS) that tries to access such a dependency .capnp
     # will fail.  I fail to see a significantly better approach than to provide the path manually based
-    # on where the dependency's source code should sit in a sibling subdir off IPC_META_ROOT (or off
+    # on where the dependency's source code should sit in a sibling subdir off FLOW_LIKE_META_ROOT (or off
     # ${CMAKE_CURRENT_SOURCE_DIR}/..; same thing).
     #
     # Note that the analogous C++ #include will work fine, because CMake would have propagated the include
@@ -88,7 +88,7 @@ function(generate_custom_srcs)
     #
     # Lastly note that we'll cumulatively need to do this for all of our dependents also needing similar
     # `.capnp`s to be importable.
-    set(CAPNPC_IMPORT_DIRS ${IPC_META_ROOT_ipc_transport_structured}/src)
+    set(CAPNPC_IMPORT_DIRS ${FLOW_LIKE_META_ROOT_ipc_transport_structured}/src)
 
     message(VERBOSE "We are a subdir of a meta-project.  Manually added the following sibling paths to the capnp "
                       "import paths: [${CAPNPC_IMPORT_DIRS}].")
