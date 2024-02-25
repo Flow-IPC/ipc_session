@@ -1455,8 +1455,8 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp
         const auto n_init_channels_by_srv_req = log_in_rsp_root.getNumInitChannelsBySrvReq();
         if ((n_init_channels_by_srv_req != 0) && (!init_channels_by_srv_req))
         {
-          FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, and it is "
-                           "the expected LogInRsp message; but this side passed null container for "
+          FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, "
+                           "and it is the expected LogInRsp message; but this side passed null container for "
                            "init-channels-by-srv-request, while server indicates it will open "
                            "[" << n_init_channels_by_srv_req << "] of them -- this or other side misbehaved?  "
                            "Will go back to NULL state and report to user via on-async-connect handler.");
@@ -1467,10 +1467,10 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp
           auto cli_namespace_mv = Shared_name::ct(string(log_in_rsp_root.getClientNamespace()));
           if (cli_namespace_mv.empty() || (cli_namespace_mv == Shared_name::S_SENTINEL))
           {
-            FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, and it "
-                             "is the expected LogInRsp message; but the cli-namespace [" << cli_namespace_mv << "] therein "
-                             "is illegal -- other side misbehaved?  Will go back to NULL "
-                             "state and report to user via on-async-connect handler.");
+            FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Log-in response received, "
+                             "and it is the expected LogInRsp message; but the cli-namespace "
+                             "[" << cli_namespace_mv << "] therein is illegal -- other side misbehaved?  Will go "
+                             "back to NULL state and report to user via on-async-connect handler.");
             err_code = error::Code::S_CLIENT_MASTER_LOG_IN_RESPONSE_BAD;
           }
           else // if (all good)
@@ -1483,19 +1483,21 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp
                                                               ? init_channels_by_cli_req_pre_sized->size()
                                                               : 0);
 
-            FLOW_LOG_INFO("Client session [" << *this << "]: Session-connect request: Log-in response received, and it is "
-                          "the expected LogInRsp message; cli-namespace [" << Base::cli_namespace() << "] received and "
-                          "saved.  Init-channel count expected is [" << n_init_channels << "]; of these "
+            FLOW_LOG_INFO("Client session [" << *this << "]: Session-connect request: Log-in response received, and "
+                          "it is the expected LogInRsp message; cli-namespace [" << Base::cli_namespace() << "] "
+                          "received and saved.  Init-channel count expected is [" << n_init_channels << "]; of these "
                           "[" << n_init_channels_by_srv_req << "] requested by opposing server.  "
                           "If 0: Will go to PEER state and report to user via on-async-connect handler.  "
                           "Else: Will await that many open-channel-to-client requests with the init-channel info.");
 
             if (mdt_from_srv_or_null)
             {
-              /* They're interested in the metadata from server; we can now fish it out (but only set *mdt_from_srv_or_null
-               * when invoking handler on success as promised; untouched otherwise as promised).  So prepare the result.
+              /* They're interested in the metadata from server; we can now fish it out (but only set
+               * *mdt_from_srv_or_null when invoking handler on success as promised; untouched otherwise as promised).
+               * So prepare the result.
                *
-               * Use the same technique as when emitting `mdt` in on_master_channel_open_channel_req(); omitting cmnts. */
+               * Use the same technique as when emitting `mdt` in on_master_channel_open_channel_req(); omitting
+               * comments. */
               struct Rsp_and_mdt_reader
               {
                 typename Mdt_reader_ptr::element_type m_mdt_reader;

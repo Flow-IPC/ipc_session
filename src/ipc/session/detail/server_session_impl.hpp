@@ -1725,9 +1725,9 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
               }
               else // if (n_init_channels_by_cli_req is OK)
               {
-                /* @todo We are assuming good-faith here about the message's contents; should probably be more paranoid for
-                 * consistency regarding, like, a null claimed_own_proc_creds.  Change assert() to a real error maybe,
-                 * etc. */
+                /* @todo We are assuming good-faith here about the message's contents; should probably be more paranoid
+                 * for consistency regarding, like, a null claimed_own_proc_creds.  Change assert() to a real error
+                 * maybe, etc. */
                 assert(msg_root.hasClaimedOwnProcessCredentials());
 
                 auto claimed_proc_creds_root = msg_root.getClaimedOwnProcessCredentials();
@@ -1747,39 +1747,40 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                                    "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
                                    "cli-app-name [" << cli_app_name << "]); but the latter is unknown or not in the "
                                    "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
-                                   "Closing session master channel and reporting to user via on-accept-log-in handler.");
+                                   "Closing session master channel and reporting to user via on-accept-log-in "
+                                   "handler.");
                   err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CLIENT_APP_DISALLOWED_OR_UNKNOWN;
                 }
                 else // if (cli_app_ptr_or_null)
                 {
                   Base::set_cli_app_ptr(cli_app_ptr_or_null);
 
-                  /* Nice, the other side's Client_app is valid and allowed.  Run safety checks on the claimed_proc_creds;
+                  /* Nice, the other side's Client_app is valid and allowed.  Run safety checks on claimed_proc_creds;
                    * they must reconfirm the Client_app they mean is the Client_app we know by checking for consistency
-                   * of the values against our Client_app config; plus ensure consistency by checking gainst the OS-reported
-                   * values (in case it's some kind snafu or spoofing or who knows). */
+                   * of the values against our Client_app config; plus ensure consistency by checking gainst the
+                   * OS-reported values (in case it's some kind snafu or spoofing or who knows). */
                   if ((claimed_proc_creds != os_proc_creds)
                       || (Base::cli_app_ptr()->m_exec_path.string() != os_proc_invoked_as)
                       || (Base::cli_app_ptr()->m_user_id != claimed_proc_creds.user_id())
                       || (Base::cli_app_ptr()->m_group_id != claimed_proc_creds.group_id()))
                   {
-                    FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
-                                     "client process creds [" << claimed_proc_creds << "], "
+                    FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received "
+                                     "(claimed client process creds [" << claimed_proc_creds << "], "
                                      "OS-reported client process creds [" << os_proc_creds << "], "
                                      "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                     "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
+                                     "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in "
                                      "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
                                      "However the aforementioned process creds (UID:GID) do not match "
                                      "the aforementioned locally-configured client-app values UID:GID; and/or "
-                                     "the claimed creds (UID:GID, PID) do not match the OS-reported one from the stream; "
-                                     "and/or OS-reported invoked-as name does not *exactly* match client-app exec path.  "
-                                     "For safety: Closing session master channel and reporting to user via "
+                                     "the claimed creds (UID:GID, PID) do not match the OS-reported one from stream; "
+                                     "and/or OS-reported invoked-as name does not *exactly* match client-app exec "
+                                     "path.  For safety: Closing session master channel and reporting to user via "
                                      "on-accept-log-in handler.");
                     err_code = error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CLIENT_APP_INCONSISTENT_CREDS;
                   }
                   else // if (creds are consistent)
                   {
-                    // Even nicer, the Client_app is totally correct.  So we can do this to ~complete Session_base stuff.
+                    // Even nicer, Client_app is totally correct.  So we can do this to ~complete Session_base stuff.
                     Base::set_cli_namespace(cli_namespace_func());
 
                     // As promised run the setup thing just before sending the success response to opposing client.
@@ -1787,12 +1788,12 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                     assert(!err_code);
                     if ((err_code = pre_rsp_setup_func()))
                     {
-                      FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
-                                       "client process creds [" << claimed_proc_creds << "], "
+                      FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received "
+                                       "(claimed client process creds [" << claimed_proc_creds << "], "
                                        "OS-reported client process creds [" << os_proc_creds << "], "
                                        "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                       "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
-                                       "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
+                                       "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in "
+                                       "the allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
                                        "Everything matches.  However the per-app setup code yielded error "
                                        "(details above).  Giving up; will not send log-in response.  "
                                        "Closing session master channel and reporting to user via "
@@ -1809,8 +1810,8 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       // Firstly: the cli->srv metadata.
                       const auto log_in_req_saved = log_in_req.get(); // It'll get move()d away below; save it.
                       {
-                        /* Only set *mdt_from_cli_or_null when invoking handler on success as promised; untouched otherwise
-                         * as promised.  Use the same technique as when emitting `mdt` in
+                        /* Only set *mdt_from_cli_or_null when invoking handler on success as promised; untouched
+                         * otherwise as promised.  Use the same technique as when emitting `mdt` in
                          * on_master_channel_open_channel_req(); omitting comments. */
                         struct Req_and_mdt_reader
                         {
@@ -1855,10 +1856,10 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       if (!m_master_channel->send(log_in_rsp_msg, log_in_req_saved, &err_code))
                       {
                         /* The docs say send() returns false if:
-                         * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
-                         * via on-error handler; async_end_sending() has already been called."  Only the middle one is
-                         * possible in our case.  on_master_channel_error() shall issue m_log_in_on_done_func(truthy) in
-                         * our stead. */
+                         * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously
+                         * emitted via on-error handler; async_end_sending() has already been called."  Only the middle
+                         * one is possible in our case.  on_master_channel_error() shall issue
+                         * m_log_in_on_done_func(truthy) in our stead. */
                         FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
                                        "catch it shortly or has already caught it.");
                         return;
@@ -1871,8 +1872,8 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                                          "(claimed client process creds [" << claimed_proc_creds << "], "
                                          "OS-reported client process creds [" << os_proc_creds << "], "
                                          "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                         "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in "
-                                         "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
+                                         "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and "
+                                         "in allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
                                          "Init-channel count expected is [" << n_init_channels << "]; of these "
                                          "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
                                          "Everything matches.  "
@@ -1885,20 +1886,20 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       else // if (!err_code)
                       {
                         // Excellent.  m_master_channel auto-proceeds to logged-in phase on successful send().
-                        FLOW_LOG_INFO("Server session [" << *this << "]: Accept-log-in: Log-in request received (claimed "
-                                      "client process creds [" << claimed_proc_creds << "], "
+                        FLOW_LOG_INFO("Server session [" << *this << "]: Accept-log-in: Log-in request received "
+                                      "(claimed client process creds [" << claimed_proc_creds << "], "
                                       "OS-reported client process creds [" << os_proc_creds << "], "
                                       "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
-                                      "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in the "
+                                      "client-app [" << *(Base::cli_app_ptr()) << "]); and the latter is known and in "
                                       "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
                                       "Everything matches.  "
-                                      "Log-in response, including saved cli-namespace [" << Base ::cli_namespace() << "], "
-                                      "sent OK.  "
+                                      "Log-in response, including saved cli-namespace "
+                                      "[" << Base ::cli_namespace() << "], sent OK.  "
                                       "Init-channel count expected is [" << n_init_channels << "]; of these "
                                       "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
                                       "If 0: Will go to almost-PEER state and report to user via on-accept-log-in "
-                                      "handler (user must then invoke init_handlers() on the Server_session to reach PEER "
-                                      "state).  "
+                                      "handler (user must then invoke init_handlers() on the Server_session to reach "
+                                      "PEER state).  "
                                       "Else: Will send that many open-channel-to-client requests with the init-channel "
                                       "info; and await one ack in return.");
                       } // else if (!err_code from send())
