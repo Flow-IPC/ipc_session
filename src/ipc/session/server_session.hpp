@@ -29,7 +29,7 @@ namespace ipc::session
 
 /**
  * Implements Session concept on the Server_app end: a Session that is emitted in almost-PEER state by
- * local Session_server accepting a connection by an opposing `Client_session_mv::async_connect()`.
+ * local Session_server accepting a connection by an opposing XXX`Client_session_mv::async_connect()`.
  * By "almost-PEER state" we mean that the user, upon obtaining a new `Server_session_mv`, must still call
  * init_handlers() to enter PEER state.  See overview of Session hierarchy
  * in namespace ipc::session doc header; then come back here if desired.

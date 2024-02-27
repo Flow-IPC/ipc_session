@@ -140,7 +140,7 @@ public:
    * This value shall be known and immutable from construction for Server_session, since the server namespace -- PID
    * as of this writing -- can be determined from the start on the server side and applies to every server session
    * that Session_server produces.  Client_session, however, determines
-   * it at the latest possible moment which is at Client_session::async_connect() time, at which point it needs
+   * it at the latest possible moment which is at Client_session::async_connect()XXX time, at which point it needs
    * to determine the PID via PID file.
    *
    * @return See above.
@@ -195,7 +195,7 @@ public:
 
   /**
    * Computes the absolute name at which the server shall set up a transport::Native_socket_stream_acceptor
-   * to which client shall transport::Native_socket_stream::async_connect() in order to establish a PEER-state
+   * to which client shall transport::Native_socket_stream::async_connect()XXX in order to establish a PEER-state
    * session.
    *
    * This must be called no earlier than set_srv_namespace(); otherwise behavior undefined (assertion
@@ -533,9 +533,9 @@ TEMPLATE_SESSION_BASE
 CLASS_SESSION_BASE::Session_base(const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                                  flow::async::Task_asio_err&& on_err_func,
                                  On_passive_open_channel_func&& on_passive_open_channel_func_or_empty_arg) :
-  /* This is, basically, the (protected) ctor for Client_session, followed by Client_session::async_connect().
+  /* This is, basically, the (protected) ctor for Client_session, followed by Client_session::async_connect()XXX.
    * By the time we're constructed, by definition Client_app and, therefore-ish, m_on_*_func are known.
-   * However: m_srv_namespace is looked-up (in file system, as of this writing) at the forthcoming async_connect();
+   * However: m_srv_namespace is looked-up (in file system, as of this writing) at the forthcoming async_connect()XXX;
    * empty for now; set_srv_namespace() invoked at that time.   m_cli_namespace is returned by server in
    * log-in response; set_cli_namespace() invoked at that time. */
 

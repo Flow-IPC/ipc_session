@@ -31,7 +31,7 @@
 namespace ipc::session
 {
 
-/**
+/** XXX all file comments for both async_connect()s CONN conn Conn
  * Internal, non-movable pImpl-lite implementation of Client_session_mv class template.
  * In and of itself it would have been directly and publicly usable; however Client_session_mv adds move semantics.
  *
@@ -267,39 +267,13 @@ public:
    */
   Mdt_builder_ptr mdt_builder() const;
 
-  /**
-   * See Client_session_mv counterpart.
-   *
-   * @return See Client_session_mv counterpart.
-   *
-   * @param on_done_func
-   *        See Client_session_mv counterpart.
-   */
-  template<typename Task_err>
-  bool async_connect(Task_err&& on_done_func);
-
-  /**
-   * See Client_session_mv counterpart.
-   *
-   * @return See Client_session_mv counterpart.
-   *
-   * @param mdt
-   *        See Client_session_mv counterpart.
-   * @param init_channels_by_cli_req_pre_sized
-   *        See Client_session_mv counterpart.
-   * @param mdt_from_srv_or_null
-   *        See Client_session_mv counterpart.
-   * @param init_channels_by_srv_req
-   *        See Client_session_mv counterpart.
-   * @param on_done_func
-   *        See Client_session_mv counterpart.
-   */
-  template<typename Task_err>
-  bool async_connect(const Mdt_builder_ptr& mdt,
-                     Channels* init_channels_by_cli_req_pre_sized,
-                     Mdt_reader_ptr* mdt_from_srv_or_null,
-                     Channels* init_channels_by_srv_req,
-                     Task_err&& on_done_func);
+  // XXX
+  bool sync_connect(Error_code* err_code);
+  bool sync_connect(const Mdt_builder_ptr& mdt,
+                    Channels* init_channels_by_cli_req_pre_sized,
+                    Mdt_reader_ptr* mdt_from_srv_or_null,
+                    Channels* init_channels_by_srv_req,
+                    Error_code* err_code);
 
   /**
    * See Client_session_mv counterpart.
@@ -338,6 +312,32 @@ protected:
   using Master_structured_channel = typename Base::Master_structured_channel;
 
   // Methods.
+
+  // XXX
+  bool sync_connect_impl(Error_code* err_code, Function<bool (flow::async::Task_asio_err&&)>* async_connect_impl_func);
+
+  /**XXX
+   * See Client_session_mv counterpart.
+   *
+   * @return See Client_session_mv counterpart.
+   *
+   * @param mdt
+   *        See Client_session_mv counterpart.
+   * @param init_channels_by_cli_req_pre_sized
+   *        See Client_session_mv counterpart.
+   * @param mdt_from_srv_or_null
+   *        See Client_session_mv counterpart.
+   * @param init_channels_by_srv_req
+   *        See Client_session_mv counterpart.
+   * @param on_done_func
+   *        See Client_session_mv counterpart.
+   */
+  template<typename Task_err>
+  bool async_connect(const Mdt_builder_ptr& mdt,
+                     Channels* init_channels_by_cli_req_pre_sized,
+                     Mdt_reader_ptr* mdt_from_srv_or_null,
+                     Channels* init_channels_by_srv_req,
+                     Task_err&& on_done_func);
 
   /**
    * Utility for sub-classes: executed from async_connect()'s `on_done_func(Error_code())` (i.e., directly
@@ -912,38 +912,65 @@ CLASS_CLI_SESSION_IMPL::~Client_session_impl()
     dtor_async_worker_stop();
   }
 
-  /* Like it says, as we promised in doc header(s), the destruction of *this shall cause any registered completion
-   * handlers (namely async-connect one) to be called from some unspecified thread(s) that aren't thread U, and once
-   * they've all finished, the dtor returns.  So which thread should we use?  (Rest of comment -- see
-   * Native_socket_stream::Impl::~Impl() similar spot.  Same applies here.) */
-  if (!m_conn_on_done_func_or_empty.empty())
-  {
-    assert(m_state == State::S_CONNECTING);
-    FLOW_LOG_INFO("Client session [" << *this << "]: Continuing shutdown.  Next we will run user async-connect "
-                  "handler from some other thread.  In this user thread we will await its completion and then return.");
-
-    /* @todo boost::async() does this too.  We could provide our own version in flow::async (no pun intended)
-     * to reduce boiler-plate of invocations like the below.  It'd be nice for consistency of the setup of the
-     * new, short-lived threads; e.g., logging formatting is set up the same, stuff is logged the same...
-     * as our official, long-lived threads like m_async_worker. */
-    Single_thread_task_loop one_thread(get_logger(), ostream_op_string("cli_sess[", *this, "]-temp_deinit"));
-    one_thread.start([&]()
-    {
-      FLOW_LOG_INFO("Client session [" << *this << "]: In transient finisher thread: Shall run pending handler.");
-
-      m_conn_on_done_func_or_empty(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER);
-      FLOW_LOG_TRACE("User async-connect handler finished.");
-    }); // one_thread.start()
-  } // if (!m_conn_on_done_func_or_empty.empty())
-  // Here thread exits/joins synchronously.  Back in thread U:
+  assert(m_conn_on_done_func_or_empty.empty()
+         && "async_connect() is used internally from sync_connect() only at this time, so this should be cleared.");
+  // XXX explain that if it were public we'd need to do one-off thread here and m_conn_on_done_func_or_empty(aborted)
 } // Client_session_impl::~Client_session_impl()
 
 TEMPLATE_CLI_SESSION_IMPL
-template<typename Task_err>
-bool CLASS_CLI_SESSION_IMPL::async_connect(Task_err&& on_done_func)
+bool CLASS_CLI_SESSION_IMPL::sync_connect(Error_code* err_code)
 {
-  return async_connect(mdt_builder(), nullptr, nullptr, nullptr, std::move(on_done_func));
+  return sync_connect(mdt_builder(), nullptr, nullptr, nullptr, err_code);
 }
+
+TEMPLATE_CLI_SESSION_IMPL
+bool CLASS_CLI_SESSION_IMPL::sync_connect(const Mdt_builder_ptr& mdt,
+                                          Channels* init_channels_by_cli_req_pre_sized,
+                                          Mdt_reader_ptr* mdt_from_srv_or_null,
+                                          Channels* init_channels_by_srv_req,
+                                          Error_code* err_code)
+{
+  using flow::async::Task_asio_err;
+
+  Function<bool (Task_asio_err&&)> async_connect_impl_func = [&](Task_asio_err&& on_done_func) -> bool
+  {
+    return async_connect(mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req,
+                         std::move(on_done_func))
+  };
+  return sync_connect_impl(err_code, &async_connect_impl_func);
+}
+
+TEMPLATE_CLI_SESSION_IMPL
+bool CLASS_CLI_SESSION_IMPL::sync_connect_impl(Error_code* err_code,
+                                               Function<bool (flow::async::Task_asio_err&&)>* async_connect_impl_func)
+{
+  using flow::async::Task_asio_err;
+  using boost::promise;
+
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, Client_session_impl::sync_connect_impl<Task_err>,
+                                     _1, async_connect_impl_func);
+  // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
+
+  // We are in thread U.
+
+  // Unless it returns false right away, this completion handler shall execute.
+  promise<void> done_promise;
+  auto on_done_func = [&](const Error_code& async_err_code)
+  {
+    // We are in thread W (non-blockingly-soon after async_connect() started).
+    *err_code = async_err_code;
+    done_promise.set_value();
+  };
+
+  if (!(*async_connect_impl_func)(Task_asio_err(std::move(on_done_func))))
+  {
+    return false;
+  }
+  // else
+
+  done_promise.get_future.wait();
+  return true;
+} // Client_session_impl::sync_connect_impl()
 
 TEMPLATE_CLI_SESSION_IMPL
 template<typename Task_err>
@@ -991,7 +1018,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
     // else we are going to CONNECTING state.
 
     m_state = State::S_CONNECTING;
-    m_conn_on_done_func_or_empty = std::move(on_done_func); // May be invoked from thread W or thread U (dtor) (a race).
+    m_conn_on_done_func_or_empty = std::move(on_done_func); // May be invoked from thread W or thread U (dtor) (a race).XXX nope
 
     Error_code err_code;
 
@@ -1289,7 +1316,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
            * null; so make it so. err_code is set. */
           m_master_channel.reset();
           // Fall through.
-        } // if (!err_code) [from sock_stm.async_connect()] (might have become truthy inside though)
+        } // if (!err_code) [from sock_stm.sync_connect()] (might have become truthy inside though)
         else // if (err_code) [from m_master_channel->async_request()]
         {
           FLOW_LOG_WARNING

@@ -29,7 +29,7 @@ namespace ipc::session
 
 /**
  * Implements Session concept on the Client_app end: a Session_mv that first achieves PEER state by connecting
- * to an opposing Session_server_mv via Client_session_mv::async_connect().  See overview of Session hierarchy
+ * to an opposing Session_server_mv via XXXand-down Client_session_mv::async_connect().  See overview of Session hierarchy
  * in namespace ipc::session doc header; then come back here if desired.
  *
  * It is unusual to use Client_session_mv template directly.  If you do wish to set up a client-side session peer,
@@ -208,7 +208,15 @@ public:
 
 #endif // IPC_DOXYGEN_ONLY
 
-  /**
+  // XXX
+  bool sync_connect(Error_code* err_code = 0);
+  bool sync_connect(const typename Base::Mdt_builder_ptr& mdt,
+                    typename Base::Channels* init_channels_by_cli_req_pre_sized,
+                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null,
+                    typename Base::Channels* init_channels_by_srv_req,
+                    Error_code* err_code = 0);
+
+  /** XXX
    * To be invoked in NULL state only, and not as-if default-cted,
    * it asynchronously attempts to connect to a opposing `Session_server`;
    * and on success invokes the given completion handler with a falsy value indicating `*this` has entered PEER state.
@@ -283,10 +291,9 @@ public:
    *        If interrupted by destructor the operation-aborted code is passed instead (see ~Client_session_mv()
    *        doc header).
    */
-  template<typename Task_err>
-  bool async_connect(Task_err&& on_done_func);
+  // XXX adapt to sync_connect()
 
-  /**
+  /** XXX again
    * Identical to the simpler async_connect() overload but offers added advanced capabilities: metadata exchange;
    * initial-channel opening.  The other overload is identical to
    * `async_connect(mdt_builder(), nullptr, nullptr, nullptr, on_done_func)` and requires
@@ -351,12 +358,6 @@ public:
    *        only if falsy #Error_code is passed to this handler.
    * @return See other async_connect() overload.
    */
-  template<typename Task_err>
-  bool async_connect(const typename Base::Mdt_builder_ptr& mdt,
-                     typename Base::Channels* init_channels_by_cli_req_pre_sized,
-                     typename Base::Mdt_reader_ptr* mdt_from_srv_or_null,
-                     typename Base::Channels* init_channels_by_srv_req,
-                     Task_err&& on_done_func);
 
   // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
   using Base::get_logger;
@@ -402,23 +403,22 @@ CLASS_CLI_SESSION_MV::Client_session_mv(flow::log::Logger* logger_ptr,
 }
 
 TEMPLATE_CLI_SESSION_MV
-template<typename Task_err>
-bool CLASS_CLI_SESSION_MV::async_connect(Task_err&& on_done_func)
+bool CLASS_CLI_SESSION_MV::sync_connect(Error_code* err_code)
 {
-  return Base::impl() ? Base::impl()->async_connect(std::move(on_done_func)) : false;
+  return Base::impl() ? Base::impl()->sync_connect(err_code) : false;
 }
 
 TEMPLATE_CLI_SESSION_MV
 template<typename Task_err>
-bool CLASS_CLI_SESSION_MV::async_connect(const typename Base::Mdt_builder_ptr& mdt,
-                                            typename Base::Channels* init_channels_by_cli_req_pre_sized,
-                                            typename Base::Mdt_reader_ptr* mdt_from_srv_or_null,
-                                            typename Base::Channels* init_channels_by_srv_req,
-                                            Task_err&& on_done_func)
+bool CLASS_CLI_SESSION_MV::sync_connect(const typename Base::Mdt_builder_ptr& mdt,
+                                        typename Base::Channels* init_channels_by_cli_req_pre_sized,
+                                        typename Base::Mdt_reader_ptr* mdt_from_srv_or_null,
+                                        typename Base::Channels* init_channels_by_srv_req,
+                                        Error_code* err_code)
 {
   return Base::impl()
-           ? Base::impl()->async_connect(mdt, init_channels_by_cli_req_pre_sized,
-                                         mdt_from_srv_or_null, init_channels_by_srv_req, std::move(on_done_func))
+           ? Base::impl()->sync_connect(mdt, init_channels_by_cli_req_pre_sized,
+                                        mdt_from_srv_or_null, init_channels_by_srv_req, err_code)
            : false;
 }
 

@@ -614,7 +614,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      * It reads the file we are about to write and locks the same inter-process mutex accordingly. */
     Named_sh_mutex_ptr sh_mutex;
     util::op_with_possible_bipc_exception(get_logger(), &our_err_code, error::Code::S_MUTEX_BIPC_MISC_LIBRARY_ERROR,
-                                          "Client_session_impl::async_connect():named-mutex-open-or-create", [&]()
+                                          "Server_session_impl::ctor:named-mutex-open-or-create", [&]()
     {
       sh_mutex = make_unique<Named_sh_mutex>(util::OPEN_OR_CREATE, mutex_name.native_str(), mutex_perms);
       /* Set the permissions as discussed in long comment above. --^
@@ -875,7 +875,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
      * Pros: much less lambda-capture boiler-plate in there.
      * Cons: (1) added state can leak (they'd need to worry about maybe clearing that stuff on entry to almost-PEER
      * state, and possibly on failure); (2) arguably less maintainable (maybe Server_session_dtl may want to
-     * make async_accept() re-triable a-la Client_session::async_connect()?).
+     * make async_accept() re-triable a-la Client_session::async_connect()?XXX).
      *
      * I, personally, have a big bias against non-const m_* state (where it can be avoided reasonably), so I
      * like that this stuff only stays around via captures, until the relevant async-op is finished.  So I prefer

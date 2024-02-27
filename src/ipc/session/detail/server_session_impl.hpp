@@ -92,7 +92,7 @@ namespace ipc::session
  * entering PEER state, at which point it is safe for us to issue open_channel()s.
  *
  * ### Back to general impl discussion ###
- * Our async_accept_log_in() is analogous/complementary to Client_session::async_connect(), but the difference is that
+ * Our async_accept_log_in() is analogous/complementary to Client_session::async_connect()XXX, but the difference is that
  * the user only gets access to a `*this` upon success of this async op; and never gets access upon failure
  * at all.  So that's another source of asymmetry versus Client_session_impl.  Thus:
  *   - No need to guard against async_accept_log_in() call while the log-in is outstanding.
@@ -566,7 +566,7 @@ private:
 
   /**
    * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
-   * the vanilla ipc::session `Session` hierarchy.  Reset essentially at start of each async_connect().
+   * the vanilla ipc::session `Session` hierarchy.
    *
    * Outgoing-direction state is touched when assembling `LogInReq` to send to opposing `Server_session`.
    * Incoming-direction state is touched/verified at the start of interpreting `LogInRsp` receiver from there.
