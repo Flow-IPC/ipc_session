@@ -63,7 +63,7 @@ int main(int argc, char const * const * argv)
   {
     ensure_run_env(argv[0], false);
 
-    // Please see main_cli.cpp.  We're just the other side of that.  Keeping comments light.
+    // Please see main_srv.cpp.  We're just the other side of that.  Keeping comments light.
 
     ipc::session::Client_session<ipc::session::schema::MqType::NONE, false>
       session(&log_logger,
