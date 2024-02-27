@@ -409,7 +409,6 @@ bool CLASS_CLI_SESSION_MV::sync_connect(Error_code* err_code)
 }
 
 TEMPLATE_CLI_SESSION_MV
-template<typename Task_err>
 bool CLASS_CLI_SESSION_MV::sync_connect(const typename Base::Mdt_builder_ptr& mdt,
                                         typename Base::Channels* init_channels_by_cli_req_pre_sized,
                                         typename Base::Mdt_reader_ptr* mdt_from_srv_or_null,
