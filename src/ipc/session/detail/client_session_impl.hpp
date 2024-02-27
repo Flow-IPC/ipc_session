@@ -947,8 +947,7 @@ bool CLASS_CLI_SESSION_IMPL::sync_connect_impl(Error_code* err_code,
   using flow::async::Task_asio_err;
   using boost::promise;
 
-  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, Client_session_impl::sync_connect_impl<Task_err>,
-                                     _1, async_connect_impl_func);
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, Client_session_impl::sync_connect_impl, _1, async_connect_impl_func);
   // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
   // We are in thread U.
@@ -968,7 +967,7 @@ bool CLASS_CLI_SESSION_IMPL::sync_connect_impl(Error_code* err_code,
   }
   // else
 
-  done_promise.get_future.wait();
+  done_promise.get_future().wait();
   return true;
 } // Client_session_impl::sync_connect_impl()
 
