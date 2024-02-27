@@ -1273,7 +1273,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
              * our case.  on_master_channel_error() shall issue m_conn_on_done_func_or_empty(truthy) in our stead. */
             FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
                            "catch it shortly or has already caught it.");
-            return; // <-- Attention!  Async-op started (error handler coming).
+            return true; // <-- Attention!  Async-op started (error handler coming).
           }
           // else
 
@@ -1281,7 +1281,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
           {
             FLOW_LOG_TRACE("Client session [" << *this << "]: Log-in request issued.  Awaiting log-in response.  "
                            "CONNECTING state still in effect.");
-            return; // <-- Attention!  Async-op started (completion handler coming).
+            return true; // <-- Attention!  Async-op started (completion handler coming).
           }
           // else
 
