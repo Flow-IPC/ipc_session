@@ -987,7 +987,7 @@ void CLASS_SESSION_SERVER_IMPL::sync_accept(util::Fine_duration timeout, Error_c
 
   if (flow::error::exec_void_and_throw_on_error
         ([&](Error_code* actual_err_code)
-            { sync_accept_impl(timeout, actual_err_code, std::forward<Accept_args>(accept_args)...); },
+            { sync_accept(timeout, actual_err_code, std::forward<Accept_args>(accept_args)...); },
          err_code, "Session_server_impl::sync_accept_impl()"))
   {
     return;
