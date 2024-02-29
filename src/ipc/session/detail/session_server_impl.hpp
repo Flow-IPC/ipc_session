@@ -994,7 +994,7 @@ void CLASS_SESSION_SERVER_IMPL::sync_accept(util::Fine_duration timeout, Error_c
   }
   // If got here: err_code is not null.
 
-  promise done_promise;
+  promise<void> done_promise;
   this_session_srv()->async_accept(std::forward<Accept_args>(accept_args)...,
                                    [&](const Error_code& async_err_code)
   {

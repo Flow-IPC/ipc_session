@@ -81,7 +81,6 @@ int main(int argc, char const * const * argv)
                   "at that point we will be satisfied and will exit.");
 
     decltype(srv)::Server_session_obj session;
-    Error_code err_code;
     srv.sync_accept(boost::chrono::seconds(10), nullptr, // Just throw on error (including/most likely timeout).
                     &session);
 
