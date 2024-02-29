@@ -257,7 +257,7 @@ struct Server_app : public App
    *       items are moot (as opening a session is a prerequisite for anything else).
    *   - Permissions set on any SHM pool created for a given `"shm::*::Server_session"`. and
    *     `"shm::*::Session_server"`. A Client_app may not be able to complete its session-open attempt
-   *     (shm::classic::Client_session::async_connect(), etc.) if its user lacks the permissions to open the
+   *     (shm::classic::Client_session::sync_connect(), etc.) if its user lacks the permissions to open the
    *     underlying SHM-pool(s) resource in the file system.(It also conceivably may be able to complete the
    *     session-open but fail if opening a pool on-demand later; the session will then likely end
    *     prematurely.  This depends on the inner workings of the particular SHM system chosen;

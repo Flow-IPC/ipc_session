@@ -45,11 +45,13 @@ namespace ipc::session
  * sans concurrency, those threads as a collection can be thought of as one thread.
  *
  * Thread W is the async worker thread where most work is done; this helps us entirely avoid mutexes.
- * Both async_connect() and open_channel() are fairly infrequently called, so it's not necessary to avoid
- * latency by doing work concurrently in threads U and W.  So we keep it simple by posting most stuff onto thread W.
+ * Both async_connect() (from sync_connect()) and open_channel() are fairly infrequently called, so it's not necessary
+ * to avoid latency by doing work concurrently in threads U and W.  So we keep it simple by posting most stuff
+ * onto thread W.
  *
  * There are two distinct states (other than NULL): CONNECTING (async_connect() outstanding) and PEER (it succeeded:
- * `*this` is now a Session in PEER state per concept).
+ * `*this` is now a Session in PEER state per concept).  (As of this writing async_connect() is `private` and
+ * invoked by `public` sync_connect(); more on that jsut below.)
  *
  * ### CONNECTING state impl ###
  * Once async_connect() is issued we must do the following:
@@ -57,19 +59,68 @@ namespace ipc::session
  *      which is computable by a #Base helper.  So that it can be computed we need to find out
  *      Session_base::srv_namespace() which we immediately do by checking the expected file that should have been
  *      written by Session_server.
- *   -# Issue the Native_socket_stream::async_connect() to that abstract-address and await success asynchronously.
+ *   -# Issue the Native_socket_stream::sync_connect() which shall synchronously/non-blockingly connect to that
+ *      abstract-address.
  *   -# Once that's done, go back to NULL on failure; or continue as follows on success: The Native_socket_stream,
  *      now in PEER state (connected), is upgraded to (wrapped by) a transport::Channel which is in turn upgraded to
  *      a transport::struc::Channel Client_session_impl::m_master_channel.
  *      This is the session master channel, in log-in phase (as client)
- *      (details of that API are in transport::struc::Channel docs).  So we immediately issue the next (and final)
- *      async step: sending the log-in requset over `m_master_channel` and async-await log-in response.
- *   -# Once that's done, go back to NULL on failure; or else yay: we're now in PEER state.
+ *      (details of that API are in transport::struc::Channel docs).  So we immediately issue the next
+ *      async step: sending the log-in request over `m_master_channel` and async-await log-in response.
+ *   -# Once that's done, go back to NULL on failure; or else yay: we're now in PEER state...
+ *   -# ...almost.  If the advanced form of sync_connect() was the one invoked, there's an additional exchange of
+ *      info about init-channels, wherein the opposing Session_server sends us info about the pre-opened init-channels.
+ *      If so, PEER state is reached upon receipt of this; otherwise immediately.
  *
  * See session_master_channel.capnp for the schema for `m_master_channel`.  Reading that gives a nice overview of
  * the protocol involved, both in CONNECTING (after the socket is connected) and in PEER.  Also notable is that
  * this setup allows us to immediately "eat our own dog food" by using a `struc::Channel` to enable the opening
  * of any further channels (structured or otherwise).
+ *
+ * ### CONNECTING state and asynchronicity ###
+ * As written, sync_connect() -- as a black box -- is synchronous and non-blocking.  It is written trivially
+ * as invoking async_connect() (which is `private`); giving it a simple completion handler that fulfills a
+ * `promise`; sync_connect() awaits this fulfillment in the user's calling thread and then returns.  This raises
+ * two key questions.
+ *
+ * One, how is this even possible -- if there's (even internally) an async step, how can sync_connect() be
+ * synchronous yet non-blocking?  Answer: First we quote the Client_session_mv public doc header which explains
+ * why there is only `sync_connect()` but no `async_connect()`:
+ * "Without networking, the other side (Session_server) either exists/is listening; or no.
+ * Connecting is a synchronous, non-blocking operation; so an `async_connect()` API in this context only makes
+ * life harder for the user.  (However, there are some serious plans to add a networking-capable counterpart
+ * (probably via TCP at least) to `Native_socket_stream` and therefore Client_session_mv; such a networky-client-session
+ * class will almost certainly have an `async_connect()`, while its `sync_connect()` will probably become potentially
+ * blocking.)"  So that is why it works: in a local setting, the socket-connect is synchronous/fast; and upon
+ * connecting the necessary log-in/init-channel exchange is also quick.
+ *
+ * Two: Why is it written like this?  Wouldn't the internal code be simpler, if it lacked asynchronicity?
+ * The answer is two-fold:
+ *   - The mundane reason as of this writing is there is no transport::struc::Channel `sync_expect_msgs()`,
+ *     a hypothetical method that'd await N incoming messages.  That's a to-do maybe: provide
+ *     `sync_expect_msg[s]()` which would be to `expect_msg[s]()` what `sync_request()` is to `async_request()`.
+ *     Then the init-channel phase can be written in synchronous form.
+ *     - That said, the other steps listed above are already writable in synchronous form:
+ *       transport::Native_socket_stream::sync_connect() we already use; the log-in `.async_request()` can be
+ *       trivially replaced with `.sync_request()`.
+ *   - But the true, deeper reason has to do with the above public-facing quote: When/if we network-enable
+ *     some form of `*this`, all 2-3 quick/synchronous steps described will potentially block; and we'll need
+ *     to make async_connect() a public API.  At that point writing sync_connect() in terms of async_connect()
+ *     will pay dividends.  The trade-off is the existing code is somewhat more complex in the meantime.
+ *     - Detail: Since there is no public `Native_socket_stream::async_connect()` (as it, too, is not network-enabled),
+ *       we do use the simpler-to-use `Native_socket_stream::sync_connect()`.  Once network-enabled, that guy
+ *       will become potentially blocking; so we'd need to start using the speculated public-API `async_connect()`.
+ *
+ * A related aspect is that `on_done_func` completion handler we pass to async_connect() currently *will* fire
+ * before sync_connect() returns; so there's no contract for the dtor to fire it with operation-aborted error code,
+ * and we can just `assert()` on this in dtor and not worry about it further.  Yet if async_connect() becomes public,
+ * then there's no longer that guarantee, and we'll need to fire it as needed from dtor.
+ *
+ * In the code itself we sometimes refer to the above discussion to hopefully make maintenance/future development
+ * easier.
+ *
+ * @note If some form of `*this` becomes network-enabled, open_channel() too will need an async form most likely,
+ *       while existing open_channel() would become potentially-blocking.
  *
  * ### Protocol negotiation ###
  * First please see transport::struc::sync_io::Channel doc header section of the same name.  (There is involved
@@ -269,18 +320,14 @@ public:
   /**
    * See Client_session_mv counterpart.
    *
-   * @return See Client_session_mv counterpart.
-   *
-   * @param on_done_func
+   * @param err_code
    *        See Client_session_mv counterpart.
+   * @return See Client_session_mv counterpart.
    */
-  template<typename Task_err>
-  bool async_connect(Task_err&& on_done_func);
+  bool sync_connect(Error_code* err_code);
 
   /**
    * See Client_session_mv counterpart.
-   *
-   * @return See Client_session_mv counterpart.
    *
    * @param mdt
    *        See Client_session_mv counterpart.
@@ -290,15 +337,15 @@ public:
    *        See Client_session_mv counterpart.
    * @param init_channels_by_srv_req
    *        See Client_session_mv counterpart.
-   * @param on_done_func
+   * @param err_code
    *        See Client_session_mv counterpart.
+   * @return See Client_session_mv counterpart.
    */
-  template<typename Task_err>
-  bool async_connect(const Mdt_builder_ptr& mdt,
-                     Channels* init_channels_by_cli_req_pre_sized,
-                     Mdt_reader_ptr* mdt_from_srv_or_null,
-                     Channels* init_channels_by_srv_req,
-                     Task_err&& on_done_func);
+  bool sync_connect(const Mdt_builder_ptr& mdt,
+                    Channels* init_channels_by_cli_req_pre_sized,
+                    Mdt_reader_ptr* mdt_from_srv_or_null,
+                    Channels* init_channels_by_srv_req,
+                    Error_code* err_code);
 
   /**
    * See Client_session_mv counterpart.
@@ -337,6 +384,51 @@ protected:
   using Master_structured_channel = typename Base::Master_structured_channel;
 
   // Methods.
+
+  /**
+   * Utility for `*this` and sub-classes: Implements sync_connect() given a functor that invokes
+   * the calling class's (including Client_session_impl) async_connect() with the args passed to the calling
+   * sync_connect().
+   *
+   * This allows sub-classes to reuse our straightforward `promise`-based implementation of sync_connect()
+   * in terms of async_connect().  Otherwise they'd need to copy/paste that stuff or something.
+   * E.g., see shm::classic::Client_session_impl and/or shm::arena_lend::jemalloc::Client_session_impl.
+   * If sub-classes were not an issue, sync_connect_impl() would not be needed; we'd just call our
+   * async_connect() directly.
+   *
+   * @param err_code
+   *        See sync_connect().
+   * @param async_connect_impl_func
+   *        Non-null pointer to a function that (1) calls `async_connect()`-like method, forwarding to it
+   *        the args to the calling `sync_connect()`-like method, except (2) the last arg is to be a forward
+   *        of the `on_done_func`-signature-matching arg to `async_connect_impl_func`.
+   * @return See sync_connect().
+   */
+  bool sync_connect_impl(Error_code* err_code, Function<bool (flow::async::Task_asio_err&&)>* async_connect_impl_func);
+
+  /**
+   * Core implementation of sync_connect().
+   * See "CONNECTING state and asynchronicity" in class doc header for key background.
+   * 
+   * @return See sync_conect().
+   * @param mdt
+   *        See sync_conect().
+   * @param init_channels_by_cli_req_pre_sized
+   *        See sync_conect().
+   * @param mdt_from_srv_or_null
+   *        See sync_conect().
+   * @param init_channels_by_srv_req
+   *        See sync_conect().
+   * @param on_done_func
+   *        What to invoke in thread W on completion of the async-connect.  As of this writing this is supplied
+   *        by sync_connect_impl() internal code.
+   */
+  template<typename Task_err>
+  bool async_connect(const Mdt_builder_ptr& mdt,
+                     Channels* init_channels_by_cli_req_pre_sized,
+                     Mdt_reader_ptr* mdt_from_srv_or_null,
+                     Channels* init_channels_by_srv_req,
+                     Task_err&& on_done_func);
 
   /**
    * Utility for sub-classes: executed from async_connect()'s `on_done_func(Error_code())` (i.e., directly
@@ -456,14 +548,14 @@ private:
     S_NULL,
 
     /**
-     * Not a peer but async_connect() in progress to try to make it a peer.  Entry from NULL; goes to PEER or NULL.
-     * No public mutating methods are possible in this state (they return immediately).
+     * Not a peer but async_connect() in progress to try to make it a peer.  Barring moves-from/moves-to:
+     * Entry from NULL; goes to PEER or NULL.
      */
     S_CONNECTING,
 
     /**
      * Is or was a connected peer.  Entry from CONNECTING; does not transition to any other state
-     * (once a PEER, always a PEER).  async_connect() is not possible in this state (it returns immediately); all
+     * (once a PEER, always a PEER).  `*_connect()` is not possible in this state (it returns immediately); all
      * other mutating public methods are possible.
      */
     S_PEER
@@ -547,29 +639,6 @@ private:
   // Methods.
 
   /**
-   * In thread W, handler for the transport::Native_socket_stream::async_connect(), as invoked in CONNECTING state.
-   *
-   * @param acc_name
-   *        transport::Native_socket_stream_acceptor address (for logging).
-   * @param sock_stm
-   *        The target `Native_socket_stream`.  In PEER state if `!async_err_code`; else in NULL state still.
-   * @param mdt
-   *        See advanced async_connect() overload.
-   * @param init_channels_by_cli_req_pre_sized
-   *        See advanced async_connect() overload.
-   * @param mdt_from_srv_or_null
-   *        See advanced async_connect() overload.
-   * @param init_channels_by_srv_req
-   *        See advanced async_connect() overload.
-   * @param async_err_code
-   *        Result of the `async_connect()` from ipc::transport.  Not operation-aborted.
-   */
-  void conn_on_async_connect_or_error(const Shared_name& acc_name, transport::Native_socket_stream&& sock_stm,
-                                      Mdt_builder_ptr&& mdt, Channels* init_channels_by_cli_req_pre_sized,
-                                      Mdt_reader_ptr* mdt_from_srv_or_null, Channels* init_channels_by_srv_req,
-                                      const Error_code& async_err_code);
-
-  /**
    * In thread W, handler for #m_master_channel indicating incoming-direction channel-hosing error.
    * It is possible that #m_master_channel has been `.reset()` in the meantime, by seeing log-in failure
    * in on_master_channel_log_in_rsp(), and no longer exists.  This is tested via the observer arg.
@@ -589,7 +658,7 @@ private:
    * as invoked in CONNECTING state only if the low-level transport::Native_socket_stream::async_connect() succeeded.
    *
    * Post-condition:
-   *   - If no init-channels requested by client (async_connect() advanced overload) *nor*
+   *   - If no init-channels requested by client (async_connect() advanced-use) *nor*
    *     by server (as indicated in `log_in_rsp` itself):
    *     #m_state changed from CONNECTING to either NULL or PEER, depending on whether the log-in
    *     response `log_in_rsp` indicates server side OKed the log-in.  Per the invariant in #m_master_channel doc
@@ -603,11 +672,11 @@ private:
    * @param log_in_rsp
    *        The response in-message from `struc::Channel`.
    * @param init_channels_by_cli_req_pre_sized
-   *        See advanced async_connect() overload.
+   *        See advanced async_connect() features.
    * @param mdt_from_srv_or_null
-   *        See advanced async_connect() overload.
+   *        See advanced async_connect() features.
    * @param init_channels_by_srv_req
-   *        See advanced async_connect() overload.
+   *        See advanced async_connect() features.
    */
   void on_master_channel_log_in_rsp(typename Master_structured_channel::Msg_in_ptr&& log_in_rsp,
                                     Channels* init_channels_by_cli_req_pre_sized, Mdt_reader_ptr* mdt_from_srv_or_null,
@@ -638,11 +707,11 @@ private:
    *        Intermediate PEER-state #Channel_obj results list; first empty, next time with 1 elements, then 2, ....
    *        If `.size() == n_init_channels`, we shall move to PEER state.
    * @param init_channels_by_cli_req_pre_sized
-   *        See advanced async_connect() overload.
+   *        See advanced async_connect() features.
    * @param mdt_from_srv_or_null
-   *        See advanced async_connect() overload.
+   *        See advanced async_connect() features.
    * @param init_channels_by_srv_req
-   *        See advanced async_connect() overload.
+   *        See advanced async_connect() features.
    * @param mdt_from_srv
    *        Value to which to set `*mdt_from_srv_or_null`, if the latter is not null, and
    *        this is the last invocation of this method.
@@ -781,7 +850,8 @@ private:
    * The session master channel.  Accessed in thread W only (not protected by mutex).
    *   - When #m_state is NULL, this is null.
    *   - When #m_state is CONNECTING:
-   *     - It is still null until transport::Native_socket_stream::async_connect() yields a PEER-state socket.
+   *     - It is still null until transport::Native_socket_stream::sync_connect() yields a PEER-state socket.
+   *       (This occurs, if it does occur, within a non-blocking time period upon entry to async_connect().)
    *     - It is not null from that point on -- including through entry to PEER -- but it *does* go back to
    *       null if log-in procedure fails putting `m_state = State::S_NULL` again.
    *   - When #m_state is PEER: It remains non-null and immutable until dtor.
@@ -933,38 +1003,79 @@ CLASS_CLI_SESSION_IMPL::~Client_session_impl()
     dtor_async_worker_stop();
   }
 
-  /* Like it says, as we promised in doc header(s), the destruction of *this shall cause any registered completion
-   * handlers (namely async-connect one) to be called from some unspecified thread(s) that aren't thread U, and once
-   * they've all finished, the dtor returns.  So which thread should we use?  (Rest of comment -- see
-   * Native_socket_stream::Impl::~Impl() similar spot.  Same applies here.) */
-  if (!m_conn_on_done_func_or_empty.empty())
-  {
-    assert(m_state == State::S_CONNECTING);
-    FLOW_LOG_INFO("Client session [" << *this << "]: Continuing shutdown.  Next we will run user async-connect "
-                  "handler from some other thread.  In this user thread we will await its completion and then return.");
-
-    /* @todo boost::async() does this too.  We could provide our own version in flow::async (no pun intended)
-     * to reduce boiler-plate of invocations like the below.  It'd be nice for consistency of the setup of the
-     * new, short-lived threads; e.g., logging formatting is set up the same, stuff is logged the same...
-     * as our official, long-lived threads like m_async_worker. */
-    Single_thread_task_loop one_thread(get_logger(), ostream_op_string("cli_sess[", *this, "]-temp_deinit"));
-    one_thread.start([&]()
-    {
-      FLOW_LOG_INFO("Client session [" << *this << "]: In transient finisher thread: Shall run pending handler.");
-
-      m_conn_on_done_func_or_empty(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER);
-      FLOW_LOG_TRACE("User async-connect handler finished.");
-    }); // one_thread.start()
-  } // if (!m_conn_on_done_func_or_empty.empty())
-  // Here thread exits/joins synchronously.  Back in thread U:
+  assert(m_conn_on_done_func_or_empty.empty()
+         && "async_connect() is used internally from sync_connect() only at this time, so this should be cleared.");
+  /* Maintenance note:
+   * Please see "CONNECTING state and asynchronicity" in class doc header for key background.
+   * As noted there, when/if some form of `*this` becomes network-enabled, async_connect() would probably become
+   * a public API that could take blocking amount of time; and if during that time user invokes this dtor, then
+   * we would here do our usual thing of creating a one-off thread and triggering m_conn_on_done_func_or_empty
+   * with an operation-aborted error code. */
 } // Client_session_impl::~Client_session_impl()
 
 TEMPLATE_CLI_SESSION_IMPL
-template<typename Task_err>
-bool CLASS_CLI_SESSION_IMPL::async_connect(Task_err&& on_done_func)
+bool CLASS_CLI_SESSION_IMPL::sync_connect(Error_code* err_code)
 {
-  return async_connect(mdt_builder(), nullptr, nullptr, nullptr, std::move(on_done_func));
+  return sync_connect(mdt_builder(), nullptr, nullptr, nullptr, err_code);
 }
+
+TEMPLATE_CLI_SESSION_IMPL
+bool CLASS_CLI_SESSION_IMPL::sync_connect(const Mdt_builder_ptr& mdt,
+                                          Channels* init_channels_by_cli_req_pre_sized,
+                                          Mdt_reader_ptr* mdt_from_srv_or_null,
+                                          Channels* init_channels_by_srv_req,
+                                          Error_code* err_code)
+{
+  using flow::async::Task_asio_err;
+
+  Function<bool (Task_asio_err&&)> async_connect_impl_func = [&](Task_asio_err&& on_done_func) -> bool
+  {
+    return async_connect(mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req,
+                         std::move(on_done_func));
+  };
+  return sync_connect_impl(err_code, &async_connect_impl_func);
+
+  /* Perf note: The above function-object-wrangling setup does not exactly scream blinding speed... but:
+   *   - It is still non-blocking/synchronous.
+   *   - Session connect is a rare operation.
+   *   - Even disregarding the preceding bullet, the function-object-wrangling is probably minor compared to all
+   *     the stuff async_connect() must do.
+   * So the code reuse/relative brevity is worth it. */
+}
+
+TEMPLATE_CLI_SESSION_IMPL
+bool CLASS_CLI_SESSION_IMPL::sync_connect_impl(Error_code* err_code,
+                                               Function<bool (flow::async::Task_asio_err&&)>* async_connect_impl_func)
+{
+  using flow::async::Task_asio_err;
+  using boost::promise;
+
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, Client_session_impl::sync_connect_impl, _1, async_connect_impl_func);
+  // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
+
+  // We are in thread U.
+
+  // Unless it returns false right away, this completion handler shall execute.
+  promise<void> done_promise;
+  auto on_done_func = [&](const Error_code& async_err_code)
+  {
+    // We are in thread W (non-blockingly-soon after async_connect() started).
+    *err_code = async_err_code;
+    done_promise.set_value();
+  };
+
+  /* In something closer to English: this is: async_connect(..., on_done_func), where ... are the args -- except
+   * err_code -- passed to calling sync_connect() by user.  Just we're allowing a guy like us, but not necessarily us
+   * (for example shm::classic::Client_session_impl), to reuse our little promise-wait technique above. */
+  if (!(*async_connect_impl_func)(Task_asio_err(std::move(on_done_func))))
+  {
+    return false;
+  }
+  // else
+
+  done_promise.get_future().wait(); // Non-blocking amount of waiting.
+  return true;
+} // Client_session_impl::sync_connect_impl()
 
 TEMPLATE_CLI_SESSION_IMPL
 template<typename Task_err>
@@ -984,12 +1095,17 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
   using boost::lexical_cast;
   using boost::bad_lexical_cast;
   using boost::movelib::make_unique;
+  using boost::make_shared;
   using boost::io::ios_all_saver;
   using fs::ifstream;
   using std::getline;
   using std::string;
   using std::to_string;
   // using ::errno; // It's a macro apparently.
+
+  /* Maintenance note:
+   * Please see "CONNECTING state and asynchronicity" in class doc header for key background.
+   * Then come back here.  Especially heed this is trying to network-enable this code. */
 
   // We are in thread U.
   assert((!m_async_worker.in_thread()) && "Do not call directly from its own completion handler.");
@@ -1011,7 +1127,12 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
     // else we are going to CONNECTING state.
 
     m_state = State::S_CONNECTING;
-    m_conn_on_done_func_or_empty = std::move(on_done_func); // May be invoked from thread W or thread U (dtor) (a race).
+    /* Maintenance note: If/when some form of *this becomes network-enabled (async_connect() becomes public),
+     * the following statement will become true: m_conn_on_done_func_or_empty() may now beinvoked from thread W or
+     * thread U (dtor) (a race).  Hence dtor code will need to be added to indeed invoke it with operation-aborted
+     * code, if it is still not .empty() by then.  That's why -- to make networking-enabling `*this` easier --
+     * we even save m_conn_on_done_func_or_empty as opposed to only passing it around in lambda capture(s). */
+    m_conn_on_done_func_or_empty = std::move(on_done_func);
 
     Error_code err_code;
 
@@ -1031,7 +1152,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
      * (chicken/egg), and we lack that.  Hence way 1 is the only one available at the moment.
      *
      * So far, so good; way 1 involves an N_s_s_acceptor listening and doing async_accept()s and an
-     * N_s_s cted in NULL state performing an async_connect().  We're the client, so we'll be doing the latter.
+     * N_s_s cted in NULL state performing a sync_connect().  We're the client, so we'll be doing the latter.
      * Way 1, sadly, means we'll need a name to which to connect.  As discussed elsewhere, all shared resources
      * that are per-session are first segregated by Server_app::m_name (<=> distinct server application); then by
      * *server namespace* within that (<=> distinct server application *instance* a/k/a process <=> PID); and
@@ -1041,7 +1162,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
      * So read the PID file to get the name.  (Access to this must be synchronized against being written; details
      * below in that step.)
      *
-     * Then we'll just async-connect to the name built off that PID (and the other stuff including Server_app::m_name).
+     * Then we'll just sync-connect to the name built off that PID (and the other stuff including Server_app::m_name).
      * As a result we'll have our Native_socket_stream peer object in PEER state.  It is then trivial to wrap it
      * in a one-pipe Channel<>.
      *
@@ -1163,47 +1284,179 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
                       "Can now initiate Native_socket_stream async-connect based on this name which is "
                       "[" << acc_name << "].");
 
-        // Create NULL (unconnected) Native_socket_stream peer object.
-        auto sock_stm = boost::make_shared<transport::Native_socket_stream>
-                          (get_logger(), ostream_op_string(*this, "->", Base::srv_namespace().str()));
-        sock_stm->async_connect
-          (acc_name,
-           [this, acc_name, sock_stm = std::move(sock_stm),
-            mdt, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
-              (const Error_code& async_err_code) mutable
+        /* Create NULL (unconnected) Native_socket_stream peer object and try to get it to PEER (connected).
+         * We'll want a sync_io::N_s_s as opposed to N_s_s below; but it does not matter: their APIs are identical
+         * until PEER state is reached, and at that point we give it to Channel anyway. */
+        transport::sync_io::Native_socket_stream sock_stm(get_logger(),
+                                                          ostream_op_string(*this, "->", Base::srv_namespace().str()));
+        /* Maintenance note: As noted in "CONNECTING state and asynchronicity" in class doc header:
+         * This will need to use a hypothetical sock_stm.async_connect() and become an async step, when/if we
+         * network-enable *this in some form.  There *is* no public sock_stm.sync_connect() as of this writing,
+         * so if we wanted to write it that form now, we couldn't.  (Whether we would is an orthogonal question but
+         * moot.) */
+        sock_stm.sync_connect(acc_name, &err_code);
+
+        if (!err_code)
         {
-          // We are in thread Wo (unspecified, really Native_socket_stream worker thread).
-          if (async_err_code == transport::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER)
+          /* Connect succeeded, but we may quickly encounter problems anyway; so err_code may be truthy after all
+           * ultimately.  We have pretty much all we need for the Channel to go into m_master_channel though. */
+          FLOW_LOG_INFO
+            ("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
+             "sync-connect to [" << acc_name << "] successfully yielded [" << sock_stm << "].  "
+             "Wrapping in 1-pipe Channel; then wrapping that in a direct-heap-serializing struc::Channel; "
+             "then issuing log-in request.");
+
+          /* Bit of ipc::transport nerdery here:
+           *   - struc::Channel needs sync_io-pattern-peer-bearing Channel to upgrade-from;
+           *   - specifically we've chosen Socket_stream_channel as that Channel type;
+           *   - whose ctor takes a move(sync_io::Native_socket_stream) (sync_io-pattern Native_socket_stream);
+           *   - which is why we made a sync_io::Native_socket_stream (not Native_socket_stream) sock_stm above */
+
+          transport::Socket_stream_channel<true>
+            unstructured_master_channel(get_logger(), ostream_op_string("smc-", *this), std::move(sock_stm));
           {
-            // Stuff is shutting down.  GTFO.  (Our dtor will emit session::...::..._ABORTED_COMPLETION_HANDLER.)
-            return;
+            const auto opposing_proc_creds = unstructured_master_channel.remote_peer_process_credentials(&err_code);
+            assert((!err_code) && "It really should not fail that early.  If it does look into this code.");
+            FLOW_LOG_INFO("Client session [" << *this << "]: Opposing process info: [" << opposing_proc_creds << "].");
           }
-          // else: We post all real work onto our thread W.
-          m_async_worker.post([this, acc_name, sock_stm = std::move(sock_stm),
-                               mdt = std::move(mdt),
-                               init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req,
-                               async_err_code]
-                                () mutable
+
+          // sock_stm is now hosed.  We have the Channel.
+
+          /* Finally: eat the Channel; make it live inside m_master_channel.  This session master channel requires
+           * a log-in phase (the only such channel in the session), so use that ctor. */
+          assert(!m_master_channel);
+          m_master_channel
+            = make_shared<Master_structured_channel>(get_logger(), std::move(unstructured_master_channel),
+                                                     transport::struc::Channel_base::S_SERIALIZE_VIA_HEAP,
+                                                     false); // We are the client, not the server.
+          // unstructured_master_channel is now hosed.
+
+          /* Also enable liveness checking and keep-alive; the other side will do the same.
+           * Read comment in Server_session_impl in similar spot; the same applies symmetrically here. */
+          m_master_channel->owned_channel_mutable()->auto_ping();
+          m_master_channel->owned_channel_mutable()->idle_timer_run();
+
+          m_master_channel->start([this, master_channel_observer = Master_structured_channel_observer(m_master_channel)]
+                                    (const Error_code& channel_err_code) mutable
           {
-            // We are in thread W.
-            conn_on_async_connect_or_error(acc_name, std::move(*sock_stm),
-                                           std::move(mdt),
+            // We are in thread Wc (unspecified, really struc::Channel async callback thread).
+            m_async_worker.post([this,
+                                 master_channel_observer = std::move(master_channel_observer),
+                                 channel_err_code]()
+            {
+              on_master_channel_error(master_channel_observer, channel_err_code);
+            });
+            // @todo Add unexpected response handlers?  One firing would be a bug, so formally shouldn't be needed....
+          });
+
+          /* OK!  m_master_channel is rocking... but in the log-in phase (as client).  Follow the quite-rigid steps
+           * documented for that phase namely: create (and sync-nb-send) the log-in message and expect log-in
+           * response in-message the receipt of which means logged-in phase has been reached.  So this is another
+           * async step (we must await the response).  It should be quite quick, as the server is doing its half of
+           * the algorithm right now, but I digress.
+           *
+           * Except, actually, the log-in request message has already been created in mdt_builder(), so as to give
+           * user Builder into the metadata sub-field in there.  That should be mutated, as needed, and now
+           * we fill out the rest of it and sync-nb-send it. */
+          auto& log_in_req_msg = (reinterpret_cast<Master_channel_req*>(mdt.get()))->m_req_msg;
+
+          // Fill out the log-in request.  See SessionMasterChannelMessageBody.LogInReq.
+          auto msg_root = log_in_req_msg.body_root()->getLogInReq();
+
+          // Please see "Protocol negotiation" in our class doc header for discussion.
+          m_protocol_negotiator.reset(); // In case this is a 2nd, 3rd, ... connect attempt or something.
+          m_protocol_negotiator_aux.reset();
+          auto proto_neg_root = msg_root.initProtocolNegotiationToServer();
+          proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
+          proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
+          /* That was our advertising our capabilities to them.  We'll perform negotiation check at LogInRsp receipt.
+           *
+           * Maintenance note: This is also remarked upon as of this writing in the schema .capnp file around LogInReq:
+           * If we add more versions than 1 in the future, *and* we aim to be backwards-compatible with at least 1
+           * older protocol version, then we must be careful in the below LogInReq setter code; as at *this* time we
+           * don't yet know server side's capabilities (not until LogInRsp!), hence we can't know which version to
+           * speak.  So until then (which isn't long) we need to be protocol-version-agnostic. */
+
+          msg_root.setMqTypeOrNone(S_MQ_TYPE_OR_NONE);
+          msg_root.setNativeHandleTransmissionEnabled(S_TRANSMIT_NATIVE_HANDLES);
+          msg_root.setShmTypeOrNone(S_SHM_TYPE);
+          // .metadata is already filled out.
+          msg_root.setNumInitChannelsByCliReq(init_channels_by_cli_req_pre_sized
+                                                ? init_channels_by_cli_req_pre_sized->size()
+                                                : 0);
+
+          auto claimed_own_proc_creds = msg_root.initClaimedOwnProcessCredentials();
+          claimed_own_proc_creds.setProcessId(util::Process_credentials::own_process_id());
+          claimed_own_proc_creds.setUserId(util::Process_credentials::own_user_id());
+          claimed_own_proc_creds.setGroupId(util::Process_credentials::own_group_id());
+          // Our ClientApp::m_name (srv has list of allowed ones):
+          msg_root.initOwnApp().setName(Base::cli_app_ptr()->m_name);
+
+          // Synchronously, non-blockingly, can't-would-blockingly send it.  This can fail (it will log WARNING if so).
+          auto on_log_in_rsp_func
+            = [this, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
+                (typename Master_structured_channel::Msg_in_ptr&& log_in_rsp) mutable
+          {
+            // We are in thread Wc (as in above error handler).
+            m_async_worker.post([this, log_in_rsp = std::move(log_in_rsp),
+                                 init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
+                                  () mutable
+            {
+              on_master_channel_log_in_rsp(std::move(log_in_rsp),
                                            init_channels_by_cli_req_pre_sized,
                                            mdt_from_srv_or_null,
-                                           init_channels_by_srv_req,
-                                           async_err_code);
-          });
-        }); // sock_stm->async_connect()
-        return true; // Do *not* fall through.
-      } // if (!err_code)
-      // else if (err_code): Fall through.
-    } // if (!err_code) (might have become truthy inside though)
+                                           init_channels_by_srv_req);
+            });
+          };
+          /* Maintenance note: (Background: "CONNECTING state and asynchronicity" in class doc header.)
+           * We could use sync_request() here, leading to simpler code.  As mentioned that doc-section, though,
+           * leaving it in ->async_request() form for when/if *this (in some form) becomes network-enabled.
+           * We already have the async error handling all set-up and wouldn't need to change write much more, etc. */
+          if (!m_master_channel->async_request(log_in_req_msg, nullptr, nullptr, // One-off (single response).
+                                               std::move(on_log_in_rsp_func), &err_code))
+          {
+            /* The docs say async_request() returns false if:
+             * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
+             * via on-error handler; async_end_sending() has already been called."  Only the middle one is possible in
+             * our case.  on_master_channel_error() shall issue m_conn_on_done_func_or_empty(truthy) in our stead. */
+            FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
+                           "catch it shortly or has already caught it.");
+            return true; // <-- Attention!  Async-op started (error handler coming).
+          }
+          // else
 
-    assert(err_code && "All code paths except a single success one (above) must have led to a truthy Error_code.");
+          if (!err_code)
+          {
+            FLOW_LOG_TRACE("Client session [" << *this << "]: Log-in request issued.  Awaiting log-in response.  "
+                           "CONNECTING state still in effect.");
+            return true; // <-- Attention!  Async-op started (completion handler coming).
+          }
+          // else
+
+          /* Back to the drawing board (no async-op started); and while at the drawing board the master channel is
+           * null; so make it so. err_code is set. */
+          m_master_channel.reset();
+          // Fall through.
+        } // if (!err_code) [from sock_stm.sync_connect()] (might have become truthy inside though)
+        else // if (err_code) [from m_master_channel->async_request()]
+        {
+          FLOW_LOG_WARNING
+            ("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
+             "sync-connect to [" << acc_name << "] failed (code "
+             "[" << err_code << "] [" << err_code.message() << "]).  Will go back to NULL state and report "
+             "to user via on-async-connect handler.");
+          // Fall through.
+        }
+      } // if (!err_code) [from: srv_namespace_mv -> `pid` conversion] (might have become truthy inside though)
+      // else if (err_code) { Fall through. }
+    } // if (!err_code) [from: reading srv_namespace_mv from CNS file] (might have become truthy inside though)
+    // else if (err_code) { Fall through. }
+
+    assert(err_code && "All code paths except async-op-starting ones (above) must have led to a truthy Error_code.");
 
     // Can emit.
     assert((m_state == State::S_CONNECTING)
-           && "Only way to exit CONNECTING state is past NSS async-connect handler which we didn't initiate.");
+           && "A lot of (albeit synchronous) code above... just making sure.");
     assert((!m_conn_on_done_func_or_empty.empty())
            && "m_conn_on_done_func_or_empty can only be emptied upon executing it.");
 
@@ -1224,185 +1477,6 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
 
   return result;
 } // Client_session_impl::async_connect()
-
-TEMPLATE_CLI_SESSION_IMPL
-void CLASS_CLI_SESSION_IMPL::conn_on_async_connect_or_error(const Shared_name& acc_name,
-                                                            transport::Native_socket_stream&& sock_stm,
-                                                            Mdt_builder_ptr&& mdt,
-                                                            Channels* init_channels_by_cli_req_pre_sized,
-                                                            Mdt_reader_ptr* mdt_from_srv_or_null,
-                                                            Channels* init_channels_by_srv_req,
-                                                            const Error_code& async_err_code)
-{
-  using flow::util::ostream_op_string;
-  using boost::make_shared;
-
-  // We are in thread W.
-
-  auto err_code = async_err_code; // We may need to overwrite it anyway.
-  if (!err_code)
-  {
-    /* Connect succeeded, but we may quickly encounter problems anyway; so err_code may be truthy after all
-     * ultimately.  We have pretty much all we need for the Channel to go into m_master_channel though. */
-    FLOW_LOG_INFO("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
-                  "async-connect to [" << acc_name << "] successfully yielded [" << sock_stm << "].  "
-                  "Wrapping in 1-pipe Channel; then wrapping that in a direct-heap-serializing struc::Channel; "
-                  "then issuing log-in request.");
-
-    /* Bit of sweet ipc::transport nerdery here:
-     *   - struc::Channel needs sync_io-pattern-peer-bearing Channel to upgrade-from;
-     *   - specifically we've chosen Socket_stream_channel as that Channel type;
-     *   - whose ctor takes a move(sync_io::Native_socket_stream) (sync_io-pattern Native_socket_stream);
-     *   - but sock_stm is a Native_socket_stream (not in sync_io:: -- it is an async-I/O-pattern Native_socket_stream)
-     *   - (which is just because it was convenient for our caller to make it that way, to .async_connect() more
-     *      easily than when having to operate a sync_io core);
-     *   - so obtain the sync_io core N_s_s from async-I/O N_s_s using sock_stm.release(). */
-
-    transport::Socket_stream_channel<true>
-      unstructured_master_channel(get_logger(), ostream_op_string("smc-", *this),
-                                  std::move(sock_stm.release()));
-    {
-      const auto opposing_proc_creds = unstructured_master_channel.remote_peer_process_credentials(&err_code);
-      assert((!err_code) && "It really should not fail that early.  If it does look into this code.");
-      FLOW_LOG_INFO("Client session [" << *this << "]: Opposing process info: [" << opposing_proc_creds << "].");
-    }
-
-    // sock_stm is now hosed.  We have the Channel.  A couple more things before we can make it structured.
-
-    /* Finally: eat the Channel; make it live inside m_master_channel.  This session master channel requires
-     * a log-in phase (the only such channel in the session), so use that ctor. */
-    assert(!m_master_channel);
-    m_master_channel = make_shared<Master_structured_channel>(get_logger(), std::move(unstructured_master_channel),
-                                                              transport::struc::Channel_base::S_SERIALIZE_VIA_HEAP,
-                                                              false); // We are the client, not the server.
-    // unstructured_master_channel is now hosed.
-
-    /* Also enable liveness checking and keep-alive; the other side will do the same.
-     * Read comment in Server_session_impl in similar spot; the same applies symmetrically here. */
-    m_master_channel->owned_channel_mutable()->auto_ping();
-    m_master_channel->owned_channel_mutable()->idle_timer_run();
-
-    m_master_channel->start([this, master_channel_observer = Master_structured_channel_observer(m_master_channel)]
-                              (const Error_code& channel_err_code) mutable
-    {
-      // We are in thread Wc (unspecified, really struc::Channel async callback thread).
-      m_async_worker.post([this,
-                           master_channel_observer = std::move(master_channel_observer),
-                           channel_err_code]()
-      {
-        on_master_channel_error(master_channel_observer, channel_err_code);
-      });
-      // @todo Add unexpected response handlers?  One firing would be a bug, so formally it shouldn't be needed....
-    });
-
-    /* OK!  m_master_channel is rocking... but in the log-in phase (as client).  Follow the quite-rigid steps
-     * documented for that phase namely: create (and sync-nb-send) the log-in message and expect log-in
-     * response in-message the receipt of which means logged-in phase has been reached.  So this is another
-     * async step (we must await the response).  It should be quite quick, as the server is doing its half of
-     * the algorithm right now, but I digress.
-     *
-     * Except, actually, the log-in request message has already been created in mdt_builder(), so as to give
-     * user Builder into the metadata sub-field in there.  That should be mutated, as needed, and now
-     * we fill out the rest of it and sync-nb-send it. */
-    auto& log_in_req_msg = (reinterpret_cast<Master_channel_req*>(mdt.get()))->m_req_msg;
-
-    // Fill out the log-in request.  See SessionMasterChannelMessageBody.LogInReq.
-    auto msg_root = log_in_req_msg.body_root()->getLogInReq();
-
-    // Please see "Protocol negotiation" in our class doc header for discussion.
-    m_protocol_negotiator.reset(); // In case this is a 2nd, 3rd, ... connect attempt or something.
-    m_protocol_negotiator_aux.reset();
-    auto proto_neg_root = msg_root.initProtocolNegotiationToServer();
-    proto_neg_root.setMaxProtoVer(m_protocol_negotiator.local_max_proto_ver_for_sending());
-    proto_neg_root.setMaxProtoVerAux(m_protocol_negotiator_aux.local_max_proto_ver_for_sending());
-    /* That was our advertising our capabilities to them.  We'll perform negotiation check at LogInRsp receipt.
-     *
-     * Maintenance note: This is also remarked upon as of this writing in the schema .capnp file around LogInReq:
-     * If we add more versions than 1 in the future, *and* we aim to be backwards-compatible with at least 1
-     * older protocol version, then we must be careful in the below LogInReq setter code; as at *this* time we don't
-     * yet know server side's capabilities (not until LogInRsp!), hence we can't know which version to speak.
-     * So until then (which isn't long) we need to be protocol-version-agnostic. */
-
-    msg_root.setMqTypeOrNone(S_MQ_TYPE_OR_NONE);
-    msg_root.setNativeHandleTransmissionEnabled(S_TRANSMIT_NATIVE_HANDLES);
-    msg_root.setShmTypeOrNone(S_SHM_TYPE);
-    // .metadata is already filled out.
-    msg_root.setNumInitChannelsByCliReq(init_channels_by_cli_req_pre_sized
-                                          ? init_channels_by_cli_req_pre_sized->size()
-                                          : 0);
-
-    auto claimed_own_proc_creds = msg_root.initClaimedOwnProcessCredentials();
-    claimed_own_proc_creds.setProcessId(util::Process_credentials::own_process_id());
-    claimed_own_proc_creds.setUserId(util::Process_credentials::own_user_id());
-    claimed_own_proc_creds.setGroupId(util::Process_credentials::own_group_id());
-    msg_root.initOwnApp().setName(Base::cli_app_ptr()->m_name); // Our ClientApp::m_name (srv has list of allowed ones).
-
-    // Synchronously, non-blockingly, can't-would-blockingly send it.  This can fail (it will log WARNING if so).
-    auto on_log_in_rsp_func
-      = [this, init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
-          (typename Master_structured_channel::Msg_in_ptr&& log_in_rsp) mutable
-    {
-      // We are in thread Wc (as in above error handler).
-      m_async_worker.post([this, log_in_rsp = std::move(log_in_rsp),
-                           init_channels_by_cli_req_pre_sized, mdt_from_srv_or_null, init_channels_by_srv_req]
-                            () mutable
-      {
-        on_master_channel_log_in_rsp(std::move(log_in_rsp),
-                                     init_channels_by_cli_req_pre_sized,
-                                     mdt_from_srv_or_null,
-                                     init_channels_by_srv_req);
-      });
-    };
-    if (!m_master_channel->async_request(log_in_req_msg, nullptr, nullptr, // One-off (single response).
-                                         std::move(on_log_in_rsp_func), &err_code))
-    {
-      /* The docs say send() (request-issuing form) returns false if:
-       * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously emitted
-       * via on-error handler; async_end_sending() has already been called."  Only the middle one is possible in
-       * our case.  on_master_channel_error() shall issue m_conn_on_done_func_or_empty(truthy) in our stead. */
-      FLOW_LOG_TRACE("send() synchronously failed; must be an error situation.  Error handler should "
-                     "catch it shortly or has already caught it.");
-      return;
-    }
-    // else
-
-    if (err_code)
-    {
-      /* It failed, so as far as they're concerned, it's no different from the async-connect failing.  Back
-       * to the drawing board; and while at the drawing board the master channel is null; so make it so.
-       * err_code is set. */
-      m_master_channel.reset();
-    }
-    else
-    {
-      FLOW_LOG_TRACE("Client session [" << *this << "]: Log-in request issued.  Awaiting log-in response.  "
-                     "CONNECTING state still in effect.");
-      return;
-    }
-  } // if (!err_code) // But it can become truthy inside.
-  else
-  {
-    FLOW_LOG_WARNING("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
-                     "async-connect to [" << acc_name << "] failed (code "
-                     "[" << err_code << "] [" << err_code.message() << "]).  Will go back to NULL state and report "
-                     "to user via on-async-connect handler.");
-  }
-
-  assert(err_code && "All code paths except a single success one must have led to a truthy Error_code.");
-  // C'est le fail.  Back to NULL state; report the result to user.
-
-  assert((m_state == State::S_CONNECTING)
-         && "Only way to exit CONNECTING state is past NSS async-connect handler: we are it.");
-  assert((!m_conn_on_done_func_or_empty.empty())
-         && "m_conn_on_done_func_or_empty can only be emptied upon executing it.");
-
-  m_state = State::S_NULL;
-
-  FLOW_LOG_TRACE("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
-                 "async-connect to [" << acc_name << "] failed, or it succeeded but the log-in request sending "
-                 "failed (see above for details).  Executing handler.");
-  invoke_conn_on_done_func(err_code);
-} // Client_session_impl::conn_on_async_connect_or_error()
 
 TEMPLATE_CLI_SESSION_IMPL
 void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp

@@ -189,7 +189,7 @@
  * in terms of the API.
  *
  * #Client_session does not begin in PEER state.  One constructs it in NULL state, then invokes
- * `Client_session::async_connect()` to connect to the server process if any exists; once it fires its handler
+ * `Client_session::sync_connect()` to connect to the server process if any exists; once it fires its handler
  * successfully, the #Client_session is a Session in PEER state.  If #Client_session, per Session concept requirements,
  * indicates the session has finished (due to the other side ending session), one must create a new #Client_session
  * and start over (w/r/t IPC and relevant shared resources).
@@ -306,7 +306,7 @@ using Server_session
  *         Whether it shall be possible to transmit a native handle via the channel.
  * @tparam Mdt_payload
  *         See Session concept.  In addition the same type may be used for `mdt` or `mdt_from_srv_or_null`
- *         in async_connect().  (If it is used for open_channel() and/or passive-open and/or async_connect()
+ *         in async_connect()XXX.  (If it is used for open_channel() and/or passive-open and/or `*connect()`
  *         `mdt` and/or `mdt_from_srv_or_null`, recall that you can use a capnp-`union` internally for various
  *         purposes.)
  *

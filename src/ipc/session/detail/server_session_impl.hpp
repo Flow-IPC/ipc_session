@@ -92,10 +92,12 @@ namespace ipc::session
  * entering PEER state, at which point it is safe for us to issue open_channel()s.
  *
  * ### Back to general impl discussion ###
- * Our async_accept_log_in() is analogous/complementary to Client_session::async_connect(), but the difference is that
+ * Our async_accept_log_in() is analogous/complementary to Client_session_impl::async_connect(), but the diff is that
  * the user only gets access to a `*this` upon success of this async op; and never gets access upon failure
  * at all.  So that's another source of asymmetry versus Client_session_impl.  Thus:
  *   - No need to guard against async_accept_log_in() call while the log-in is outstanding.
+ *     - (As of *this* writing Client_session_impl only uses async_connect() internally and does not expose it,
+ *       so it's not an issue there either; but that would change, if it became network-enabled at some level.)
  *   - No need to guard against other API calls, notably open_channel(), before (almost-)PEER state is achieved.
  *     (User only gets access to `*this`, once `*this` is in (almost-)PEER state.)
  *
@@ -566,7 +568,7 @@ private:
 
   /**
    * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
-   * the vanilla ipc::session `Session` hierarchy.  Reset essentially at start of each async_connect().
+   * the vanilla ipc::session `Session` hierarchy.
    *
    * Outgoing-direction state is touched when assembling `LogInReq` to send to opposing `Server_session`.
    * Incoming-direction state is touched/verified at the start of interpreting `LogInRsp` receiver from there.
@@ -1633,7 +1635,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
       m_async_worker.post([this, channel_err_code]() { on_master_channel_error(channel_err_code); });
     });
 
-    /* Let's overview our task as the session-opening server.  We do the other side of what Client_session does
+    /* Let's overview our task as the session-opening server.  We do the other side of what Client_session_impl does
      * in it async_connect() flow, but we have one fewer phase: we already have the connected Native_socket_stream
      * and even have subsumed it in a Channel and even have subsumed *that* in a struc::Channel already.
      * So we just need to do the server side of the log-in.  It may help to follow along that part of the code

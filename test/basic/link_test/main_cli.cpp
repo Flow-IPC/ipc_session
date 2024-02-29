@@ -63,7 +63,7 @@ int main(int argc, char const * const * argv)
   {
     ensure_run_env(argv[0], false);
 
-    // Please see main_cli.cpp.  We're just the other side of that.  Keeping comments light.
+    // Please see main_srv.cpp.  We're just the other side of that.  Keeping comments light.
 
     ipc::session::Client_session<ipc::session::schema::MqType::NONE, false>
       session(&log_logger,
@@ -73,31 +73,18 @@ int main(int argc, char const * const * argv)
     FLOW_LOG_INFO("Session-client attempting to open session against session-server; "
                   "it'll either succeed or fail very soon; and at that point we will exit.");
 
-    bool ok = false;
-    promise<void> connected_promise;
-    session.async_connect([&](const Error_code& err_code)
+    Error_code err_code;
+    session.sync_connect(&err_code);
+    if (err_code)
     {
-      if (err_code)
-      {
-        FLOW_LOG_WARNING("Connect failed (perhaps you did not execute session-server executable in parallel, or "
-                         "you executed one or both of us oddly?).  "
-                         "Error: [" << err_code << "] [" << err_code.message() << "].");
-      }
-      else
-      {
-        FLOW_LOG_INFO("Session opened.");
-        ok = true;
-      }
-      // Either way though:
-      connected_promise.set_value();
-    });
-
-    connected_promise.get_future().wait();
-
-    if (ok)
-    {
-      FLOW_LOG_INFO("Session opened: [" << session << "].");
+      FLOW_LOG_WARNING("Connect failed (perhaps you did not execute session-server executable in parallel, or "
+                       "you executed one or both of us oddly?).  "
+                       "Error: [" << err_code << "] [" << err_code.message() << "].");
+      return BAD_EXIT;
     }
+    // else
+
+    FLOW_LOG_INFO("Session opened: [" << session << "].");
     FLOW_LOG_INFO("Exiting.");
   } // try
   catch (const exception& exc)
