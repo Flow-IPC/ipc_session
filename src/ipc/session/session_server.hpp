@@ -439,6 +439,12 @@ public:
                     Mdt_load_func&& mdt_load_func,
                     Task_err&& on_done_func);
 
+  // XXX
+  template<typename... Accept_args>
+  void sync_accept(util::Fine_duration timeout, Error_code* err_code, Accept_args&&... accept_args);
+  template<typename... Accept_args>
+  void sync_accept(Error_code* err_code, Accept_args&&... accept_args);
+
   /**
    * Prints string representation to the given `ostream`.
    *
@@ -509,6 +515,20 @@ void CLASS_SESSION_SERVER::async_accept(Server_session_obj* target_session,
 {
   Impl::async_accept(target_session, init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
                      std::move(n_init_channels_by_srv_req_func), std::move(mdt_load_func), std::move(on_done_func));
+}
+
+TEMPLATE_SESSION_SERVER
+template<typename... Accept_args>
+void CLASS_SESSION_SERVER::sync_accept(util::Fine_duration timeout, Error_code* err_code, Accept_args&&... accept_args)
+{
+  Impl::sync_accept(timeout, err_code, std::forward<Accept_args>(accept_args)...);
+}
+
+TEMPLATE_SESSION_SERVER
+template<typename... Accept_args>
+void CLASS_SESSION_SERVER::sync_accept(Error_code* err_code, Accept_args&&... accept_args)
+{
+  sync_accept(util::Fine_duration::max(), err_code, std::forward<Accept_args>(accept_args)...);
 }
 
 TEMPLATE_SESSION_SERVER

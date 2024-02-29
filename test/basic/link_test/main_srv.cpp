@@ -32,8 +32,6 @@ int main(int argc, char const * const * argv)
   using flow::Error_code;
   using flow::Flow_log_component;
 
-  using boost::promise;
-
   using std::string;
   using std::exception;
 
@@ -71,7 +69,6 @@ int main(int argc, char const * const * argv)
      * used struc::Channel used for establishing the session; so features of ipc_transport_structured are being
      * exercised among other things. */
 
-
     ensure_run_env(argv[0], true);
 
     /* common.[hc]pp has the server/client descriptions which are (as they must be) equal between the client app
@@ -84,35 +81,19 @@ int main(int argc, char const * const * argv)
                   "at that point we will be satisfied and will exit.");
 
     decltype(srv)::Server_session_obj session;
-    promise<void> accepted_promise;
-    bool ok = false;
-    srv.async_accept(&session, [&](const Error_code& err_code)
-    {
-      if (err_code)
-      {
-        FLOW_LOG_WARNING("Error is totally unexpected.  Error: [" << err_code << "] [" << err_code.message() << "].");
-      }
-      else
-      {
-        FLOW_LOG_INFO("Session accepted: [" << session << "].");
-        ok = true;
-      }
-      // Either way though:
-      accepted_promise.set_value();
-    });
+    Error_code err_code;
+    srv.sync_accept(boost::chrono::seconds(10), nullptr, // Just throw on error (including/most likely timeout).
+                    &session);
 
-    accepted_promise.get_future().wait();
-    if (ok)
-    {
-      session.init_handlers([](const Error_code&) {});
+    FLOW_LOG_INFO("Session accepted: [" << session << "].");
+    session.init_handlers([](const Error_code&) {});
 
-      // Don't judge us.  Again, we aren't demo-ing best practices here!
-      FLOW_LOG_INFO("Sleeping for a few sec to avoid yanking session away from other side right after opening it.  "
-                    "This is not intended to demonstrate a best practice -- just acting a certain way in a "
-                    "somewhat contrived short-lived-session scenario; essentially so that on the client side it "
-                    "can \"savor\" the newly-open session, before we take it down right away.");
-      flow::util::this_thread::sleep_for(boost::chrono::seconds(1));
-    }
+    // Don't judge us.  Again, we aren't demo-ing best practices here!
+    FLOW_LOG_INFO("Sleeping for a few sec to avoid yanking session away from other side right after opening it.  "
+                  "This is not intended to demonstrate a best practice -- just acting a certain way in a "
+                  "somewhat contrived short-lived-session scenario; essentially so that on the client side it "
+                  "can \"savor\" the newly-open session, before we take it down right away.");
+    flow::util::this_thread::sleep_for(boost::chrono::seconds(1));
 
     FLOW_LOG_INFO("Exiting.");
   } // try

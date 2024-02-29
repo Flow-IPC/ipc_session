@@ -241,6 +241,10 @@ public:
                     Mdt_load_func&& mdt_load_func,
                     Task_err&& on_done_func);
 
+  // XXX
+  template<typename... Accept_args>
+  void sync_accept(util::Fine_duration timeout, Error_code* err_code, Accept_args&&... accept_args);
+
   /**
    * See Server_session method.
    *
@@ -969,6 +973,54 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
     }); // incomplete_session->async_accept_log_in()
   }); // m_master_sock_acceptor->async_accept()
 } // Session_server_impl::async_accept()
+
+TEMPLATE_SESSION_SERVER_IMPL
+template<typename... Accept_args>
+void CLASS_SESSION_SERVER_IMPL::sync_accept(util::Fine_duration timeout, Error_code* err_code,
+                                            Accept_args&&... accept_args)
+{
+  using util::Fine_duration;
+  using boost::promise;
+  using boost::chrono::round;
+  using boost::chrono::seconds;
+  using Future_status = boost::future_status;
+
+  if (flow::error::exec_void_and_throw_on_error
+        ([&](Error_code* actual_err_code)
+            { sync_accept_impl(timeout, actual_err_code, std::forward<Accept_args>(accept_args)...); },
+         err_code, "Session_server_impl::sync_accept_impl()"))
+  {
+    return;
+  }
+  // If got here: err_code is not null.
+
+  promise done_promise;
+  this_session_srv()->async_accept(std::forward<Accept_args>(accept_args)...,
+                                   [&](const Error_code& async_err_code)
+  {
+    *err_code = async_err_code;
+    done_promise.set_value();
+  });
+
+  auto future = done_promise.get_future();
+  if (timeout == Fine_duration::max())
+  {
+    FLOW_LOG_INFO("Session acceptor [" << *this << "]: About to perform a blocking, no-timeout single "
+                  "accept-op.");
+    future.wait();
+  }
+  else
+  {
+    FLOW_LOG_INFO("Session acceptor [" << *this << "]: About to perform a blocking single "
+                  "accept-op; timeout = ~[" << round<seconds>(timeout) << "].");
+    if (future.wait_for(timeout) == Future_status::timeout)
+    {
+      *err_code = transport::error::Code::S_TIMEOUT;
+    }
+  }
+  FLOW_LOG_INFO("Session acceptor [" << *this << "]: Blocking, no-timeout single accept-op completed; result: "
+                "[" << *err_code << "] [" << err_code->message() << "].");
+} // Session_server_impl::sync_accept_impl()
 
 TEMPLATE_SESSION_SERVER_IMPL
 void CLASS_SESSION_SERVER_IMPL::to_ostream(std::ostream* os) const
