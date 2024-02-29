@@ -106,7 +106,7 @@ namespace ipc::session
  *         Server_app::m_kernel_persistent_run_dir_override.  (Reminder: the same `Server_app`s, by value, must
  *         be registered in all processes, whether client or server or both.  Hence this override will be
  *         agreed-upon on both sides.)
- *       - Client_session::async_connect()XXX shall check this file immediately to know to which server process --
+ *       - Client_session::sync_connect() shall check this file immediately to know to which server process --
  *         Session_server -- to connect.
  *
  * As of this writing we expect Session_server to be in charge of maintaining the process's only
@@ -342,10 +342,10 @@ public:
    * Identical to the simpler async_accept() overload but offers added advanced capabilities: metadata exchange;
    * initial-channel opening.  The other overload is identical to
    * `async_accept(target_session, nullptr, nullptr, nullptr, ...N/A..., NO_OP_FUNC, on_done_func)`
-   * (where `NO_OP_FUNC()` no-ops) and requires the opposing `async_connect()` to similarly not use the corresponding
+   * (where `NO_OP_FUNC()` no-ops) and requires the opposing `sync_connect()` to similarly not use the corresponding
    * features.
    *
-   * The advanced capabilities complement/mirror the ones on XXX Client_session_mv::async_connect() (advanced overload);
+   * The advanced capabilities complement/mirror the ones on Client_session_mv::sync_connect() (advanced overload);
    * see its doc header first.  Then come back here.  The same mechanisms underly the following; but due
    * to client-server asymmetry the API is somewhat different.
    *
@@ -354,7 +354,7 @@ public:
    * available, this provides an opportunity to do so in a structured way with a one-off message available at
    * session open, together with the opposing Session object itself.
    *
-   * The metadata payload you may wish to load to emit to the opposing XXX`Client_session::async_connect()` may
+   * The metadata payload you may wish to load to emit to the opposing `Client_session::sync_connect()` may
    * depend on the following information available *during* the session-open procedure, namely upon receiving
    * (internally) the log-in request from the client side:
    *   - the Client_app that wishes to open the session;

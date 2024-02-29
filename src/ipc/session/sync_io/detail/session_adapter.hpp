@@ -85,11 +85,11 @@ public:
    *        See Client_session_mv.
    * @param on_err_func
    *        See Client_session_mv.  However in `*this` case this shall be invoked -- though still only following
-   *        successful XXXsearch async_connect() as usual -- according to `sync_io` pattern, synchronously inside
+   *        successful `core()->sync_connect()` as usual -- according to `sync_io` pattern, synchronously inside
    *        an async-wait performed by you and reported via `(*on_active_ev_func)()`.
    * @param on_passive_open_channel_func
    *        See Client_session_mv.  However in `*this` case this shall be invoked -- though still only following
-   *        successful async_connect() as usual -- according to `sync_io` pattern, synchronously inside
+   *        successful `core()->sync_connect()` as usual -- according to `sync_io` pattern, synchronously inside
    *        an async-wait performed by you and reported via `(*on_active_ev_func)()`.
    * @tparam On_passive_open_channel_handler
    *         See Client_session_mv.
@@ -115,7 +115,7 @@ public:
    *        See Client_session_mv.
    * @param on_err_func
    *        See Client_session_mv.  However in `*this` case this shall be invoked -- though still only following
-   *        successful async_connect() as usual -- according to `sync_io` pattern, synchronously inside
+   *        successful `*_connect()` as usual -- according to `sync_io` pattern, synchronously inside
    *        an async-wait performed by you and reported via `(*on_active_ev_func)()`.
    * @tparam Task_err
    *         See Client_session_mv.
@@ -388,9 +388,12 @@ private:
    * with a `size_t sz` though).
    *
    * The reason this one is different is as follows.
-   *   - It's unlike, e.g., Client_session_adapter::async_connect()XXX, because an async-connect is triggered by the
+   *   - It's unlike, e.g., a `"Client_session_adapter::async_connect()"`, because an async-connect is triggered by the
    *     user explicitly, which triggers a single async-wait, and we disallow in our API to trigger more, until
-   *     that one completes.
+   *     that one completes.  (Confusing note: There is no such async-connect method as of this writing, because there's
+   *     no `async_connect()` on Client_session_mv, which the latter's doc header justifies... while also noting it
+   *     *would* exist, if that guy were network-enabled; we'll probably add this at some point.  So pretend it did to
+   *     grok this bullet point.  Or just ignore it for now.)
    *   - It's unlike, e.g., #m_on_err_func stuff in `*this`, because while that one can indeed happen at any time
    *     from another thread -- without the user explicitly beginning the async-op (it sort of begins by itself) --
    *     it can also only happen at most once per `*this` (modulo move-assignment).

@@ -875,7 +875,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
      * Pros: much less lambda-capture boiler-plate in there.
      * Cons: (1) added state can leak (they'd need to worry about maybe clearing that stuff on entry to almost-PEER
      * state, and possibly on failure); (2) arguably less maintainable (maybe Server_session_dtl may want to
-     * make async_accept() re-triable a-la Client_session::async_connect()?XXX).
+     * make async_accept() re-triable a-la Client_session_impl::async_connect()?).
      *
      * I, personally, have a big bias against non-const m_* state (where it can be avoided reasonably), so I
      * like that this stuff only stays around via captures, until the relevant async-op is finished.  So I prefer

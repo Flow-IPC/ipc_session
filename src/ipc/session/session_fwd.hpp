@@ -189,7 +189,7 @@
  * in terms of the API.
  *
  * #Client_session does not begin in PEER state.  One constructs it in NULL state, then invokes
- * `Client_session::async_connect()`XXX to connect to the server process if any exists; once it fires its handler
+ * `Client_session::sync_connect()` to connect to the server process if any exists; once it fires its handler
  * successfully, the #Client_session is a Session in PEER state.  If #Client_session, per Session concept requirements,
  * indicates the session has finished (due to the other side ending session), one must create a new #Client_session
  * and start over (w/r/t IPC and relevant shared resources).

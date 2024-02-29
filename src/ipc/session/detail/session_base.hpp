@@ -137,10 +137,10 @@ public:
    * See Server_session_impl, Client_session_impl.  However in Session_base this value may be not-yet-set (empty), or
    * set (and immutable from then on).
    *
-   * This value shall be known and immutable from construction for Server_session, since the server namespace -- PID
+   * This value shall be known and immutable from construction for Server_session_impl, since server namespace -- PID
    * as of this writing -- can be determined from the start on the server side and applies to every server session
-   * that Session_server produces.  Client_session, however, determines
-   * it at the latest possible moment which is at Client_session::async_connect()XXX time, at which point it needs
+   * that Session_server produces.  Client_session_impl, however, determines
+   * it at the latest possible moment which is at Client_session_impl::async_connect() time, at which point it needs
    * to determine the PID via PID file.
    *
    * @return See above.
@@ -151,8 +151,8 @@ public:
    * See Server_session_impl, Client_session_impl.  However in Session_base this value may be not-yet-set (empty), or
    * set (and immutable from then on).
    *
-   * This value shall be generated uniquely (within some context) for each new Server_session produced by
-   * Session_server; and Client_session shall find that out while logging in (last part of entering PEER
+   * This value shall be generated uniquely (within some context) for each new `Server_session` produced by
+   * Session_server; and Client_session_impl shall find that out while logging in (last part of entering PEER
    * state).
    *
    * @return See above.
@@ -164,9 +164,9 @@ public:
    * (and immutable from then on).  Note the value to which we refer is the actual pointer.  (The Client_app that
    * is pointed-to, itself, is certainly immutable too.)
    *
-   * This value shall be set from the start in a Client_session but determined during a given Server_session's log-in
-   * (the opposing Client_session will transmit the Client_app::m_name).  The log-in shall complete the Server_session's
-   * entry to PEER state.
+   * This value shall be set from the start in a Client_session_impl but determined during a given Server_session_impl's
+   * log-in (the opposing Client_session_impl will transmit the Client_app::m_name).  The log-in shall complete the
+   * `Server_session`'s entry to PEER state.
    *
    * @return See above.
    */
@@ -195,7 +195,7 @@ public:
 
   /**
    * Computes the absolute name at which the server shall set up a transport::Native_socket_stream_acceptor
-   * to which client shall transport::Native_socket_stream::async_connect()XXX in order to establish a PEER-state
+   * to which client shall transport::Native_socket_stream::sync_connect() in order to establish a PEER-state
    * session.
    *
    * This must be called no earlier than set_srv_namespace(); otherwise behavior undefined (assertion
@@ -226,7 +226,8 @@ public:
   // Data.
 
   /**
-   * Reference to Server_app (referring to local process in Server_session, opposing process in Client_session).
+   * Reference to Server_app (referring to local process in Server_session_impl, opposing process in
+   * Client_session_impl).
    * This is known from construction and immutable (both the reference, of course, and the Server_app itself).
    */
   const Server_app& m_srv_app_ref;
@@ -242,7 +243,7 @@ protected:
    * the timeout due to unrelated reasons, and it was natural to blame it on the timeout.  This much longer
    * timeout should make it obvious, in such a situation, that it's not about some slowness inside Flow-IPC
    * but a pathological application problem -- particularly around session-open time.  For example not
-   * calling Server_session::init_handlers(), or calling it late, as of this writing can cause issues with this.
+   * calling Server_session_impl::init_handlers(), or calling it late, as of this writing can cause issues with this.
    *
    * The downside is it makes Session::open_channel() potentially blocking formally speaking, whereas 500ms
    * could still claim to be non-blocking.  It's a matter of perspective really.  This value just seems to
@@ -364,7 +365,7 @@ protected:
   // Constructors.
 
   /**
-   * Constructs: Client_session form (the user is the one constructing the object, though in NULL state).
+   * Constructs: Client_session_impl form (the user is the one constructing the object, though in NULL state).
    * The values taken as args are set permanently (undefined behavior/assertion may trip if an attempt is made to
    * modify one via mutator).  The remaining values must be set via mutator before PEER state.
    *
@@ -382,7 +383,7 @@ protected:
                         On_passive_open_channel_func&& on_passive_open_channel_func_or_empty_arg);
 
   /**
-   * Constructs: Server_session form (Session_server is the one constructing the object, though in NULL state,
+   * Constructs: Server_session_impl form (Session_server is the one constructing the object, though in NULL state,
    * before log-in has completed, but after the socket-stream connection has been established).
    * The values taken as args are set permanently (undefined behavior/assertion may trip if an attempt is made to
    * modify one via mutator).  The remaining values must be set via mutator before PEER state.
@@ -454,7 +455,7 @@ protected:
    *   - hosed() must return `false`.
    *   - `err_code` must be truthy (non-success).
    *   - This must be invoked from a thread such that it is OK to *synchronously* invoke on-error handler.
-   *     As of this writing this is Server_session's or Client_session's thread W in practice, which is how
+   *     As of this writing this is Server_session_impl's or Client_session_impl's thread W in practice, which is how
    *     thread safety of hose() versus hosed() is also guaranteed by those users.
    *
    * @param err_code
@@ -478,10 +479,10 @@ private:
    *
    * ### Rationale for it being `atomic<>` ###
    * It is for the following specific reason.  Consider `ostream<<` of `*this`.  `*this` is really either
-   * in Client_session or Server_session.  In both cases these `ostream<<`s access only #m_srv_app_ref, which
-   * is immutable throughout (so no problem there) and #m_cli_app_ptr.  For Client_session #m_cli_app_ptr is
-   * also immutable throughout (so no problem there).  For Server_session however it does change in one spot:
-   * Server_session::async_accept_log_in() internal async handler for the log-in request shall, on success,
+   * in Client_session_impl or Server_session_impl.  In both cases these `ostream<<`s access only #m_srv_app_ref, which
+   * is immutable throughout (so no problem there) and #m_cli_app_ptr.  For Client_session_impl #m_cli_app_ptr is
+   * also immutable throughout (so no problem there).  For Server_session_impl however it does change in one spot:
+   * Server_session_impl::async_accept_log_in() internal async handler for the log-in request shall, on success,
    * call set_cli_app_ptr() and change it from null to non-null.  This could cause concurrent access to the
    * data member, even though it's a mere pointer (but we don't count on the alleged "atomicity" of this; it is
    * generally considered not safe).
@@ -533,9 +534,9 @@ TEMPLATE_SESSION_BASE
 CLASS_SESSION_BASE::Session_base(const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                                  flow::async::Task_asio_err&& on_err_func,
                                  On_passive_open_channel_func&& on_passive_open_channel_func_or_empty_arg) :
-  /* This is, basically, the (protected) ctor for Client_session, followed by Client_session::async_connect()XXX.
+  /* This is, basically, the (protected) ctor for Client_session, followed by Client_session_impl::async_connect().
    * By the time we're constructed, by definition Client_app and, therefore-ish, m_on_*_func are known.
-   * However: m_srv_namespace is looked-up (in file system, as of this writing) at the forthcoming async_connect()XXX;
+   * However: m_srv_namespace is looked-up (in file system, as of this writing) at the forthcoming async_connect();
    * empty for now; set_srv_namespace() invoked at that time.   m_cli_namespace is returned by server in
    * log-in response; set_cli_namespace() invoked at that time. */
 

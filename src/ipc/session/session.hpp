@@ -196,7 +196,7 @@ namespace ipc::session
  *      a #Client_session and a #Server_session.  `Server_session`s in a process, designated as the *server* in an
  *      IPC *split*, are obtained (following the acceptor pattern) via a single Session_server in that
  *      process.  On the other side, a Client_session is directly constructed (in NULL state) and
- *      enters PEER state via Client_session::async_connect()XXX.  (Conceptually this is similar to the relationship
+ *      enters PEER state via Client_session::sync_connect().  (Conceptually this is similar to the relationship
  *      between, e.g., Native_socket_stream (server side), Native_socket_stream_acceptor, and Native_socket_stream
  *      (client side).  However, it so happens that in the case of `Session`s, a different class is used depending
  *      on which side the Session sits.  Since they both implement the same concept, however, code can be written
