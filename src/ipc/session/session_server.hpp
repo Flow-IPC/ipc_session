@@ -365,7 +365,7 @@ public:
    * capnp `Mdt_payload` structure to fill; and loads the latter as desired.
    *
    * To omit using this feature do nothing in `mdt_load_func()`.  (The other async_accept() overload provides such
-   * a no-op function.)
+   * a no-op function.)  Suggest this value in that case: `[](auto&&...) {}`.
    *
    * ### Client->server metadata exchange ###
    * This is the reverse of the above.  Whatever the opposing client chose to supply as client->server metadata
@@ -388,6 +388,7 @@ public:
    *
    * If and only if `n_init_channels_by_srv_req_func()` would always return 0, you may provide a
    * null `init_channels_by_srv_req`.  `n_init_channels_by_srv_req_func` will then be ignored.
+   * Suggest this value in that case: `[](auto&&...) -> size_t { return 0; }`
    *
    * ### Init-channels by client request ###
    * This is the reverse of the above.  The opposing side shall request 0 or more init-channels-by-client-request;
@@ -482,8 +483,8 @@ void CLASS_SESSION_SERVER::async_accept(Server_session_obj* target_session, Task
 {
   // As advertised this overload always means:
 
-  auto ignored_func = [](auto&&, auto&&, auto&&) -> size_t { return 0; };
-  auto no_op_func = [](auto&&, auto&&, auto&&, auto&&) {};
+  auto ignored_func = [](auto&&...) -> size_t { return 0; };
+  auto no_op_func = [](auto&&...) {};
 
   async_accept(target_session, nullptr, nullptr, nullptr, std::move(ignored_func), std::move(no_op_func),
                std::move(on_done_func));
