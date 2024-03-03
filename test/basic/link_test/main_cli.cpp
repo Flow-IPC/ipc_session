@@ -31,14 +31,11 @@ int main(int argc, char const * const * argv)
   using flow::log::Sev;
   using flow::Error_code;
   using flow::Flow_log_component;
-
-  using boost::promise;
-
-  using std::string;
+  using flow::util::String_view;
   using std::exception;
 
-  const string LOG_FILE = "ipc_session_link_test_cli.log";
-  const int BAD_EXIT = 1;
+  constexpr String_view LOG_FILE = "ipc_session_link_test_cli.log";
+  constexpr int BAD_EXIT = 1;
 
   /* Set up logging within this function.  We could easily just use `cout` and `cerr` instead, but this
    * Flow stuff will give us time stamps and such for free, so why not?  Normally, one derives from
@@ -51,7 +48,7 @@ int main(int argc, char const * const * argv)
   FLOW_LOG_SET_CONTEXT(&std_logger, Flow_log_component::S_UNCAT);
 
   // This is separate: the IPC/Flow logging will go into this file.
-  string log_file((argc >= 2) ? string(argv[1]) : LOG_FILE);
+  const auto log_file = (argc >= 2) ? String_view(argv[1]) : LOG_FILE;
   FLOW_LOG_INFO("Opening log file [" << log_file << "] for IPC/Flow logs only.");
   Config log_config = std_log_config;
   log_config.configure_default_verbosity(Sev::S_DATA, true); // High-verbosity.  Use S_INFO in production.
@@ -73,16 +70,7 @@ int main(int argc, char const * const * argv)
     FLOW_LOG_INFO("Session-client attempting to open session against session-server; "
                   "it'll either succeed or fail very soon; and at that point we will exit.");
 
-    Error_code err_code;
-    session.sync_connect(&err_code);
-    if (err_code)
-    {
-      FLOW_LOG_WARNING("Connect failed (perhaps you did not execute session-server executable in parallel, or "
-                       "you executed one or both of us oddly?).  "
-                       "Error: [" << err_code << "] [" << err_code.message() << "].");
-      return BAD_EXIT;
-    }
-    // else
+    session.sync_connect(); // Let it throw on error.
 
     FLOW_LOG_INFO("Session opened: [" << session << "].");
     FLOW_LOG_INFO("Exiting.");
@@ -90,6 +78,8 @@ int main(int argc, char const * const * argv)
   catch (const exception& exc)
   {
     FLOW_LOG_WARNING("Caught exception: [" << exc.what() << "].");
+    FLOW_LOG_WARNING("(Perhaps you did not execute session-server executable in parallel, or "
+                     "you executed one or both of us oddly?)");
     return BAD_EXIT;
   }
 
