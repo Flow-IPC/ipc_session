@@ -347,9 +347,9 @@ public:
    * @return See other sync_connect() overload.
    */
   bool sync_connect(const typename Base::Mdt_builder_ptr& mdt,
-                    typename Base::Channels* init_channels_by_cli_req_pre_sized,
-                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null,
-                    typename Base::Channels* init_channels_by_srv_req,
+                    typename Base::Channels* init_channels_by_cli_req_pre_sized = 0,
+                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null = 0,
+                    typename Base::Channels* init_channels_by_srv_req = 0,
                     Error_code* err_code = 0);
 
 

@@ -306,7 +306,7 @@ using Server_session
  *         Whether it shall be possible to transmit a native handle via the channel.
  * @tparam Mdt_payload
  *         See Session concept.  In addition the same type may be used for `mdt` or `mdt_from_srv_or_null`
- *         in async_connect()XXX.  (If it is used for open_channel() and/or passive-open and/or `*connect()`
+ *         in `*_connect()`.  (If it is used for `open_channel()` and/or passive-open and/or `*connect()`
  *         `mdt` and/or `mdt_from_srv_or_null`, recall that you can use a capnp-`union` internally for various
  *         purposes.)
  *
