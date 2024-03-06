@@ -22,6 +22,7 @@
 #include "ipc/session/detail/session_shared_name.hpp"
 #include "ipc/session/schema/detail/session_master_channel.capnp.h"
 #include "ipc/session/app.hpp"
+#include "ipc/session/error.hpp"
 #include "ipc/transport/struc/channel.hpp"
 #include "ipc/transport/native_socket_stream_acceptor.hpp"
 #include "ipc/transport/sync_io/native_socket_stream.hpp"
@@ -1048,7 +1049,7 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
                                // (The message doesn't matter and contains no fields; only that we received it matters.)
   {
     // We are in thread Wc (unspecified, really struc::Channel async callback thread).
-    m_async_worker.post([this]()
+    m_async_worker->post([this]()
     {
       // We are in thread W.  (We need to be to safely trigger hosed() and hose().)
 
@@ -1068,7 +1069,7 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
       {
         m_this_session->hose(error::Code::S_SESSION_FINISHED); // It'll log.
       }
-    }); // m_async_worker.post()
+    }); // m_async_worker->post()
   }); // m_master_channel->expect_msg(GRACEFUL_SESSION_END)
 } // Session_base::Graceful_finisher::Graceful_finisher()
 
