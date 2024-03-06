@@ -99,7 +99,10 @@ enum OpenChannelResult
   # (Only possible when server is the passive-opener) Failed to create an underlying transport for some system
   # reason such as, one supposes, exhausted RAM resources or... who knows?
 
-  endSentinel @3;
+  gracefulSessionEnd @3;
+  # Note!  Only used for certain types of session.  See its doc header.
+
+  endSentinel @4;
 }
 
 # Main schema.
