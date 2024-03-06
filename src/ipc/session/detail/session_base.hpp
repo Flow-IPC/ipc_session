@@ -242,7 +242,134 @@ public:
   const Server_app& m_srv_app_ref;
 
 protected:
+  // Constants.
+
+  /**
+   * Internal timeout for `open_channel()`.
+   *
+   * ### The value ###
+   * We initially tried something much less generous, 500ms.  It worked fine, but some people encountered
+   * the timeout due to unrelated reasons, and it was natural to blame it on the timeout.  This much longer
+   * timeout should make it obvious, in such a situation, that it's not about some slowness inside Flow-IPC
+   * but a pathological application problem -- particularly around session-open time.  For example not
+   * calling Server_session_impl::init_handlers(), or calling it late, as of this writing can cause issues with this.
+   *
+   * The downside is it makes Session::open_channel() potentially blocking formally speaking, whereas 500ms
+   * could still claim to be non-blocking.  It's a matter of perspective really.  This value just seems to
+   * cause less confusion.  We might reconsider the whole thing however.
+   */
+  static constexpr util::Fine_duration S_OPEN_CHANNEL_TIMEOUT = boost::chrono::seconds(60);
+
+  /**
+   * The max sendable MQ message size as decided by Server_session_impl::make_channel_mqs() (and imposed on both sides,
+   * both directions), if #S_MQS_ENABLED *and* Server_session_impl::S_SHM_ENABLED is `false`, when a channel is opened
+   * (regardless of which side did the active-open or requested pre-opening at session start).
+   * If `*this` belongs to Server_session_impl, that's what this is.
+   * If it belongs to Client_session_impl, then this is what the opposing process -- if they're using the same code! --
+   * will have decided.
+   *
+   * Our own heap_fixed_builder_config(), forwarded to Session_mv::heap_fixed_builder_config(), similarly uses
+   * this constant in a matching way.
+   *
+   * @note If Server_session_impl::S_SHM_ENABLED is `true`, then a different (much smaller) MQ message size limit
+   *       is configured.  In that case, also, heap_fixed_builder_config() is not relevant and should not be used.
+   *
+   * While it looks simple, there is a number of subtleties one must understand if *ever* considering changing it.
+   *
+   * ### bipc versus POSIX MQs ###
+   * As of this writing the same constant value is used for both types of MQ configurable.  The actual value is
+   * chosen due to a certain aspect of POSIX MQs (discussed just below); and we reuse it for bipc, though we absolutely
+   * do not have to, for simplicity/for lack of better ideas at the moment.  It would be possible to bifurcate those
+   * two cases if really desired.
+   *
+   * ### Why 8Ki? ###
+   * By default in Linux POSIX MQs this happens to be the actual limit for # of unread messages --
+   * visible in /proc/sys/fs/mqueue/msgsize_max -- so we cannot go higher typically.  However that file can be modified.
+   * For now we assume a typical environment; or at least that it will not go *below* this typical default.
+   * If did try a higher number here, opening of MQs by server will likely emit an error and refuse
+   * (Server_session_impl::make_channel_mqs()).
+   *
+   * ### Things to consider if changing the value away from the above ###
+   * - Contemplate why you're doing it.  bipc MQs are seen (in Boost source) to be a simple zero-copy data structure
+   *   in an internally maintained kernel-persistent SHM pool; while I (ygoldfel) haven't verified via kernal source,
+   *   likely Linux POSIX MQ impl is something very similar (reasoning omitted but trust me).  So copy perf should
+   *   not be a factor; only RAM use and the functional ability to transmit messages of a certain size.
+   *   - If the plan is to use `transport::struc::Heap_fixed_builder`-backed for structured messages
+   *     (via transport::struc::Channel), then the max size is quite important: if a *leaf* in your message exceeds
+   *     this size when serialized, it is a fatal error.
+   *   - If, however, the plan is to use SHM-backing (e.g., via `shm::classic::*_session`), then this constant
+   *     does not get used (a much smaller value does -- so small it would be ~meaningless to decrease it).
+   * - Suppose you have changed this value, and suppose the `Heap_fixed_builder`-based use case *does* matter.
+   *   If ::ipc has not yet been released in production, ever, then it's fine (assuming, that is, it'll work
+   *   in the first place given the aforementioned `/proc/sys/...` limit for POSIX MQs).  If it *has* been
+   *   released then there is an annoying subtlety to consider:
+   *   - If you can guarantee (via release process) that the client and server will always use the same ::ipc software,
+   *     then you're still fine.  Just change this value; done.  Otherwise though:
+   *   - There's the unfortunate caveat that is Session_base::heap_fixed_builder_config().  There you will note
+   *     it says that the *server* decides (for both sides) what this value is.  In that case that method
+   *     will be correct in the server process; but if the client process is speaking to a different version
+   *     of the server, with a different value for #S_MQS_MAX_MSG_SZ, then that is a potential bug.
+   *     - Therefore it would be advisable to not mess with it (again... once a production version is out there).
+   *       If you *do* mess with it, there are ways to ensure it all works out anyway: logic could be added
+   *       wherein the client specifies its own #S_MQS_MAX_MSG_SZ when issuing an open-channel request,
+   *       and the server must honor it in its Server_session_impl::make_channel_mqs().  So it can be done --
+   *       just know that in that case you'll have to actually add such logic; or somewhat break
+   *       heap_fixed_builder_config().  The reason I (ygoldfel) have not done this already is it seems unlikely
+   *       (for various reasons listed above) that tweaking this value is of much practical value.
+   */
+  static constexpr size_t S_MQS_MAX_MSG_SZ = 8 * 1024;
+
   // Types.
+
+  /**
+   * The (internally used) session master channel is a transport::struc::Channel of this concrete type.
+   *
+   * Rationale for the chosen knob values:
+   *   - To be able to open_channel() (and hence passive-open) a #Channel_obj that can transmit native handles,
+   *     certainly a handles pipe is required to transmit half of each socket-pair.  That said, an `Mqs_channel`
+   *     would work fine if #S_SOCKET_STREAM_ENABLED is `false`.  The real reason at least a handles pipe is
+   *     required is that to establish this channel -- unlike subsequent channels in the session -- a client-server
+   *     flow is required.  This connection establishment is not possible with MQs, so of the available options
+   *     only a socket stream would work.
+   *     - There is no bulky data transfers over this channel, so adding
+   *       a parallel MQ-based blobs pipe is overkill even if it could help performance; more so since the
+   *       master channel is unlikely to be used frequently (open_channel() on either side shouldn't be that frequent).
+   *       Since, again, the minute differences in perf versus a Unix-domain-socket-based transport are unlikely to
+   *       be significant in this use case, it is easier to use a socket stream which lacks any kernel-persistent
+   *       cleanup considerations -- or even just distinct naming considerations for that matter.
+   *     - So: use a transport::Socket_stream_channel.
+   *   - Use the specially tailored (internal) session master channel capnp schema, whose key messages cover (at least):
+   *     - session log-in at the start;
+   *     - open-channel request/response.
+   *   - As of this writing, for serializing/deserializing, it's either the heap-allocating engine on either side,
+   *     or it's something SHM-based (which could be faster).  However at least some SHM-based builders/readers
+   *     themselves (internally) require a transport::Channel to function, which would require a Session typically,
+   *     creating a cyclical feature dependency.  Plus, SHM has cleanup considerations.  So a heap-based engine
+   *     on either side is the natural choice.  The cost is some perf: one copies from heap into the session master
+   *     transport; and from there into heap on the other side.  In this context that's not a significant perf loss.
+   */
+  using Master_structured_channel
+    = transport::struc::Channel_via_heap<transport::Socket_stream_channel<true>,
+                                         schema::detail::SessionMasterChannelMessageBody
+                                           <Mdt_payload_obj>>;
+
+  /**
+   * Handle to #Master_structured_channel.
+   *
+   * ### Rationale for type chosen ###
+   * It's a handle at all, because at first and possibly later there may be no session master channel, so a null
+   * value is useful.  (Though, `std::optional` could be used instead.)  It's a ref-counted pointer as opposed
+   * to `unique_ptr` so that it can be observed via #Master_structured_channel_observer (`weak_ptr`) which is not
+   * (and cannot) be available for `unique_ptr`.  The observing is needed tactically for certain async lambda needs.
+   */
+  using Master_structured_channel_ptr = boost::shared_ptr<Master_structured_channel>;
+
+  /// Observer of #Master_structured_channel_ptr.  See its doc header.
+  using Master_structured_channel_observer = boost::weak_ptr<Master_structured_channel>;
+
+  /// Concrete function type for the on-passive-open handler (if any), used for storage.
+  using On_passive_open_channel_func = Function<void (Channel_obj&& new_channel,
+                                                      Mdt_reader_ptr&& new_channel_mdt)>;
 
   /**
    * Optional to use by subclasses, this operates a simple state machine that carries out a graceful-session-end
@@ -485,135 +612,6 @@ protected:
      */
     boost::promise<void> m_opposing_session_done;
   }; // class Graceful_finisher
-
-  // Constants.
-
-  /**
-   * Internal timeout for `open_channel()`.
-   *
-   * ### The value ###
-   * We initially tried something much less generous, 500ms.  It worked fine, but some people encountered
-   * the timeout due to unrelated reasons, and it was natural to blame it on the timeout.  This much longer
-   * timeout should make it obvious, in such a situation, that it's not about some slowness inside Flow-IPC
-   * but a pathological application problem -- particularly around session-open time.  For example not
-   * calling Server_session_impl::init_handlers(), or calling it late, as of this writing can cause issues with this.
-   *
-   * The downside is it makes Session::open_channel() potentially blocking formally speaking, whereas 500ms
-   * could still claim to be non-blocking.  It's a matter of perspective really.  This value just seems to
-   * cause less confusion.  We might reconsider the whole thing however.
-   */
-  static constexpr util::Fine_duration S_OPEN_CHANNEL_TIMEOUT = boost::chrono::seconds(60);
-
-  /**
-   * The max sendable MQ message size as decided by Server_session_impl::make_channel_mqs() (and imposed on both sides,
-   * both directions), if #S_MQS_ENABLED *and* Server_session_impl::S_SHM_ENABLED is `false`, when a channel is opened
-   * (regardless of which side did the active-open or requested pre-opening at session start).
-   * If `*this` belongs to Server_session_impl, that's what this is.
-   * If it belongs to Client_session_impl, then this is what the opposing process -- if they're using the same code! --
-   * will have decided.
-   *
-   * Our own heap_fixed_builder_config(), forwarded to Session_mv::heap_fixed_builder_config(), similarly uses
-   * this constant in a matching way.
-   *
-   * @note If Server_session_impl::S_SHM_ENABLED is `true`, then a different (much smaller) MQ message size limit
-   *       is configured.  In that case, also, heap_fixed_builder_config() is not relevant and should not be used.
-   *
-   * While it looks simple, there is a number of subtleties one must understand if *ever* considering changing it.
-   *
-   * ### bipc versus POSIX MQs ###
-   * As of this writing the same constant value is used for both types of MQ configurable.  The actual value is
-   * chosen due to a certain aspect of POSIX MQs (discussed just below); and we reuse it for bipc, though we absolutely
-   * do not have to, for simplicity/for lack of better ideas at the moment.  It would be possible to bifurcate those
-   * two cases if really desired.
-   *
-   * ### Why 8Ki? ###
-   * By default in Linux POSIX MQs this happens to be the actual limit for # of unread messages --
-   * visible in /proc/sys/fs/mqueue/msgsize_max -- so we cannot go higher typically.  However that file can be modified.
-   * For now we assume a typical environment; or at least that it will not go *below* this typical default.
-   * If did try a higher number here, opening of MQs by server will likely emit an error and refuse
-   * (Server_session_impl::make_channel_mqs()).
-   *
-   * ### Things to consider if changing the value away from the above ###
-   * - Contemplate why you're doing it.  bipc MQs are seen (in Boost source) to be a simple zero-copy data structure
-   *   in an internally maintained kernel-persistent SHM pool; while I (ygoldfel) haven't verified via kernal source,
-   *   likely Linux POSIX MQ impl is something very similar (reasoning omitted but trust me).  So copy perf should
-   *   not be a factor; only RAM use and the functional ability to transmit messages of a certain size.
-   *   - If the plan is to use `transport::struc::Heap_fixed_builder`-backed for structured messages
-   *     (via transport::struc::Channel), then the max size is quite important: if a *leaf* in your message exceeds
-   *     this size when serialized, it is a fatal error.
-   *   - If, however, the plan is to use SHM-backing (e.g., via `shm::classic::*_session`), then this constant
-   *     does not get used (a much smaller value does -- so small it would be ~meaningless to decrease it).
-   * - Suppose you have changed this value, and suppose the `Heap_fixed_builder`-based use case *does* matter.
-   *   If ::ipc has not yet been released in production, ever, then it's fine (assuming, that is, it'll work
-   *   in the first place given the aforementioned `/proc/sys/...` limit for POSIX MQs).  If it *has* been
-   *   released then there is an annoying subtlety to consider:
-   *   - If you can guarantee (via release process) that the client and server will always use the same ::ipc software,
-   *     then you're still fine.  Just change this value; done.  Otherwise though:
-   *   - There's the unfortunate caveat that is Session_base::heap_fixed_builder_config().  There you will note
-   *     it says that the *server* decides (for both sides) what this value is.  In that case that method
-   *     will be correct in the server process; but if the client process is speaking to a different version
-   *     of the server, with a different value for #S_MQS_MAX_MSG_SZ, then that is a potential bug.
-   *     - Therefore it would be advisable to not mess with it (again... once a production version is out there).
-   *       If you *do* mess with it, there are ways to ensure it all works out anyway: logic could be added
-   *       wherein the client specifies its own #S_MQS_MAX_MSG_SZ when issuing an open-channel request,
-   *       and the server must honor it in its Server_session_impl::make_channel_mqs().  So it can be done --
-   *       just know that in that case you'll have to actually add such logic; or somewhat break
-   *       heap_fixed_builder_config().  The reason I (ygoldfel) have not done this already is it seems unlikely
-   *       (for various reasons listed above) that tweaking this value is of much practical value.
-   */
-  static constexpr size_t S_MQS_MAX_MSG_SZ = 8 * 1024;
-
-  // Types.
-
-  /**
-   * The (internally used) session master channel is a transport::struc::Channel of this concrete type.
-   *
-   * Rationale for the chosen knob values:
-   *   - To be able to open_channel() (and hence passive-open) a #Channel_obj that can transmit native handles,
-   *     certainly a handles pipe is required to transmit half of each socket-pair.  That said, an `Mqs_channel`
-   *     would work fine if #S_SOCKET_STREAM_ENABLED is `false`.  The real reason at least a handles pipe is
-   *     required is that to establish this channel -- unlike subsequent channels in the session -- a client-server
-   *     flow is required.  This connection establishment is not possible with MQs, so of the available options
-   *     only a socket stream would work.
-   *     - There is no bulky data transfers over this channel, so adding
-   *       a parallel MQ-based blobs pipe is overkill even if it could help performance; more so since the
-   *       master channel is unlikely to be used frequently (open_channel() on either side shouldn't be that frequent).
-   *       Since, again, the minute differences in perf versus a Unix-domain-socket-based transport are unlikely to
-   *       be significant in this use case, it is easier to use a socket stream which lacks any kernel-persistent
-   *       cleanup considerations -- or even just distinct naming considerations for that matter.
-   *     - So: use a transport::Socket_stream_channel.
-   *   - Use the specially tailored (internal) session master channel capnp schema, whose key messages cover (at least):
-   *     - session log-in at the start;
-   *     - open-channel request/response.
-   *   - As of this writing, for serializing/deserializing, it's either the heap-allocating engine on either side,
-   *     or it's something SHM-based (which could be faster).  However at least some SHM-based builders/readers
-   *     themselves (internally) require a transport::Channel to function, which would require a Session typically,
-   *     creating a cyclical feature dependency.  Plus, SHM has cleanup considerations.  So a heap-based engine
-   *     on either side is the natural choice.  The cost is some perf: one copies from heap into the session master
-   *     transport; and from there into heap on the other side.  In this context that's not a significant perf loss.
-   */
-  using Master_structured_channel
-    = transport::struc::Channel_via_heap<transport::Socket_stream_channel<true>,
-                                         schema::detail::SessionMasterChannelMessageBody
-                                           <Mdt_payload_obj>>;
-
-  /**
-   * Handle to #Master_structured_channel.
-   *
-   * ### Rationale for type chosen ###
-   * It's a handle at all, because at first and possibly later there may be no session master channel, so a null
-   * value is useful.  (Though, `std::optional` could be used instead.)  It's a ref-counted pointer as opposed
-   * to `unique_ptr` so that it can be observed via #Master_structured_channel_observer (`weak_ptr`) which is not
-   * (and cannot) be available for `unique_ptr`.  The observing is needed tactically for certain async lambda needs.
-   */
-  using Master_structured_channel_ptr = boost::shared_ptr<Master_structured_channel>;
-
-  /// Observer of #Master_structured_channel_ptr.  See its doc header.
-  using Master_structured_channel_observer = boost::weak_ptr<Master_structured_channel>;
-
-  /// Concrete function type for the on-passive-open handler (if any), used for storage.
-  using On_passive_open_channel_func = Function<void (Channel_obj&& new_channel,
-                                                      Mdt_reader_ptr&& new_channel_mdt)>;
 
   // Constructors.
 
