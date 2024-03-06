@@ -1040,11 +1040,6 @@ void CLASS_CLI_SESSION_IMPL::dtor_async_worker_stop()
 TEMPLATE_CLI_SESSION_IMPL
 CLASS_CLI_SESSION_IMPL::~Client_session_impl()
 {
-  using flow::async::Single_thread_task_loop;
-  using flow::async::Synchronicity;
-  using flow::util::ostream_op_string;
-  using boost::promise;
-
   // We are in thread U.  By contract in doc header, they must not call us from a completion handler (thread W).
 
   if (!m_async_worker.task_engine()->stopped())
