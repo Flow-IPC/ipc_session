@@ -725,7 +725,7 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
 
   if constexpr(S_GRACEFUL_FINISH_REQUIRED)
   {
-    Base::Graceful_finisher* graceful_finisher_or_null = {};
+    typename Base::Graceful_finisher* graceful_finisher_or_null = {};
     m_async_worker.post([&]() // Have to access m_graceful_finisher (the optional<>) in thread W only.
     {
       // We are in thread W.
