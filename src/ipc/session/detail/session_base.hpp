@@ -588,7 +588,7 @@ protected:
      *
      * Invoke from thread U, not thread W.
      */
-    void on_dtor_start()
+    void on_dtor_start();
 
   private:
     // Data.
@@ -1038,7 +1038,7 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
                                                          Master_structured_channel* master_channel) :
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
   m_this_session(this_session),
-  m_async_worker(async_worker);
+  m_async_worker(async_worker),
   m_master_channel(master_channel)
 {
   // We are in thread W.
