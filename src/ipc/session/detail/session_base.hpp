@@ -1055,8 +1055,8 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
 
       FLOW_LOG_INFO("Received GracefulSessionEnd from opposing Session object along session master channel "
                     "[" << *m_master_channel << "].  Will emit to local user as graceful-end "
-                    "error; and mark it down.  It our Session dtor is running, it shall return soon.  It it has "
-                    "not yet run, it shall return immediately once it does execute.");
+                    "error; and mark it down.  If our Session dtor is running, it shall return soon.  If it has "
+                    "not yet run, it shall return immediately upon starting to execute.");
 
       m_opposing_session_done.set_value();
       /* Can m_opposing_session_done already be set?  (That would throw promise exception, and we don't catch it
