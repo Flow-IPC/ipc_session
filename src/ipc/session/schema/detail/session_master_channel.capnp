@@ -99,10 +99,7 @@ enum OpenChannelResult
   # (Only possible when server is the passive-opener) Failed to create an underlying transport for some system
   # reason such as, one supposes, exhausted RAM resources or... who knows?
 
-  gracefulSessionEnd @3;
-  # Note!  Only used for certain types of session.  See its doc header.
-
-  endSentinel @4;
+  endSentinel @3;
 }
 
 # Main schema.
@@ -118,6 +115,7 @@ struct SessionMasterChannelMessageBody(MetadataPayload)
     openChannelToClientRsp @4 :OpenChannelToClientRsp;
     openChannelToServerReq @5 :OpenChannelToServerReq(MetadataPayload);
     openChannelToServerRsp @6 :OpenChannelToServerRsp;
+    gracefulSessionEnd @7 :GracefulSessionEnd;
   } # union
 } # struct SessionMasterChannelMessageBody
 
