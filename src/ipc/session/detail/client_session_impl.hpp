@@ -891,10 +891,11 @@ private:
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_CLI_SESSION_IMPL \
   template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload, \
-           schema::ShmType S_SHM_TYPE_OR_NONE>
+           schema::ShmType S_SHM_TYPE_OR_NONE, bool S_GRACEFUL_FINISH_REQUIRED_V>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_CLI_SESSION_IMPL \
-  Client_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, S_SHM_TYPE_OR_NONE>
+  Client_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, \
+                      S_SHM_TYPE_OR_NONE, S_GRACEFUL_FINISH_REQUIRED_V>
 
 TEMPLATE_CLI_SESSION_IMPL
 CLASS_CLI_SESSION_IMPL::Client_session_impl(flow::log::Logger* logger_ptr,

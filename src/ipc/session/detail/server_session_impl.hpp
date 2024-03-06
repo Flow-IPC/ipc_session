@@ -671,10 +671,11 @@ private:
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_SRV_SESSION_IMPL \
   template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload, \
-           schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ>
+           schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ, bool S_GRACEFUL_FINISH_REQUIRED_V>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_SRV_SESSION_IMPL \
-  Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, S_SHM_TYPE_OR_NONE, S_SHM_MAX_HNDL_SZ>
+  Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, \
+                      S_SHM_TYPE_OR_NONE, S_SHM_MAX_HNDL_SZ, S_GRACEFUL_FINISH_REQUIRED_V>
 
 TEMPLATE_SRV_SESSION_IMPL
 CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
