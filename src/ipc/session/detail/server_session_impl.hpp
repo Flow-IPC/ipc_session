@@ -176,9 +176,12 @@ namespace ipc::session
  * @tparam S_SHM_MAX_HNDL_SZ
  *         Ignored if `S_SHM_TYPE_OR_NONE` indicates we are not SHM-enabled, this otherwise indicates the max
  *         size of a SHM handle's blob serialization.  If ignored it must be set to 0 (convention).
+ * @tparam S_GRACEFUL_FINISH_REQUIRED_V
+ *         `true` if and only if Session_base::Graceful_finisher must be used.
+ *         See its doc header for explanation when that would be the case.
  */
 template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ>
+         schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ, bool S_GRACEFUL_FINISH_REQUIRED_V>
 class Server_session_impl :
   public Session_base<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
   public flow::log::Log_context
@@ -235,6 +238,9 @@ public:
 
   /// See Server_session_mv counterpart.
   static constexpr bool S_SOCKET_STREAM_ENABLED = Base::S_SOCKET_STREAM_ENABLED;
+
+  /// Short-hand for template parameter knob `S_GRACEFUL_FINISH_REQUIRED_V`: see class template doc header.
+  static constexpr bool S_GRACEFUL_FINISH_REQUIRED = S_GRACEFUL_FINISH_REQUIRED_V;
 
   // Constructors/destructor.
 
@@ -648,6 +654,14 @@ private:
 
   /// See sub_class_set_deinit_func().  `.empty()` unless that was called at least once.
   Function<void ()> m_deinit_func_or_empty;
+
+  /**
+   * Null until PEER state is reached, and NULL unless compile-time #S_GRACEFUL_FINISH_REQUIRED is `true`,
+   * this is used to block at the start of dtor to synchronize with the opposing `Session` dtor for safety.
+   *
+   * @see Session_base::Graceful_finisher doc header for all the background ever.
+   */
+  std::optional<typename Base::Graceful_finisher> m_graceful_finisher;
 }; // class Server_session_impl
 
 // Free functions: in *_fwd.hpp.
@@ -657,10 +671,11 @@ private:
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_SRV_SESSION_IMPL \
   template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload, \
-           schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ>
+           schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ, bool S_GRACEFUL_FINISH_REQUIRED_V>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_SRV_SESSION_IMPL \
-  Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, S_SHM_TYPE_OR_NONE, S_SHM_MAX_HNDL_SZ>
+  Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, \
+                      S_SHM_TYPE_OR_NONE, S_SHM_MAX_HNDL_SZ, S_GRACEFUL_FINISH_REQUIRED_V>
 
 TEMPLATE_SRV_SESSION_IMPL
 CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
@@ -705,7 +720,40 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
   FLOW_LOG_INFO("Server session [" << *this << "]: Shutting down.  Worker thread will be joined, but first "
                 "we perform session master channel end-sending op (flush outgoing data) until completion.  "
                 "This is generally recommended at EOL of any struc::Channel, on error or otherwise.  "
-                "This is technically blocking but unlikely to take long.");
+                "This is technically blocking but unlikely to take long.  Also a Graceful_finisher phase may "
+                "precede the above steps (it will log if so).");
+
+  if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+  {
+    typename Base::Graceful_finisher* graceful_finisher_or_null = {};
+    m_async_worker.post([&]() // Have to access m_graceful_finisher (the optional<>) in thread W only.
+    {
+      // We are in thread W.
+      if (m_graceful_finisher)
+      {
+        graceful_finisher_or_null = &(m_graceful_finisher.value());
+      }
+    }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker.post()
+
+    /* If graceful_finisher_or_null is not null, then we're definitely in PEER state, and this is irreversible;
+     * so it's cool to ->on_dtor_start() on it.  It'll block as needed, etc.
+     *
+     * If it *is* null:
+     *   - If between the assignment above to null and the next statement, m_graceful_finisher did not become
+     *     non-empty, then there's no controversy: It's still not in PEER state; and there's no reason to
+     *     block dtor still.  So no need to do anything, and that's correct.  Can just continue.
+     *   - If however in the last few microseconds (or w/e) indeed m_graceful_finisher
+     *     has become non-empty, then now *this is in PEER state.  ...NOPE!  The only way that can happen
+     *     for us -- unlike Client_session_impl as of this writing -- is via init_handlers(), which they user
+     *     themselves must execute.  So actually graceful_finisher_or_null remains accurate from up above
+     *     to the next statement.  */
+    if (graceful_finisher_or_null)
+    {
+      graceful_finisher_or_null->on_dtor_start();
+      // OK, now safe (or as safe as we can guarantee) to blow *this's various parts away.
+    }
+  } // if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+
   m_async_worker.post([&]()
   {
     // We are in thread W.
@@ -883,6 +931,12 @@ bool CLASS_SRV_SESSION_IMPL::init_handlers_impl
       on_master_channel_open_channel_req(std::move(open_channel_req));
     });
   });
+
+  // See Session_base::Graceful_finisher doc header for all the background ever.  Also: it logs as needed.
+  if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+  {
+    m_graceful_finisher.emplace(get_logger(), this, &m_async_worker, m_master_channel.get());
+  }
 
   return true;
 } // Server_session_impl::init_handlers_impl()
@@ -2110,6 +2164,11 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_error(const Error_code& err_code)
   if (!Base::hosed())
   {
     Base::hose(err_code);
+  }
+
+  if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+  {
+    m_graceful_finisher->on_master_channel_hosed();
   }
 } // Server_session_impl::on_master_channel_error()
 

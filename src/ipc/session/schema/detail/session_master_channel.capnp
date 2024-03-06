@@ -115,6 +115,7 @@ struct SessionMasterChannelMessageBody(MetadataPayload)
     openChannelToClientRsp @4 :OpenChannelToClientRsp;
     openChannelToServerReq @5 :OpenChannelToServerReq(MetadataPayload);
     openChannelToServerRsp @6 :OpenChannelToServerRsp;
+    gracefulSessionEnd @7 :GracefulSessionEnd;
   } # union
 } # struct SessionMasterChannelMessageBody
 
@@ -330,6 +331,21 @@ struct OpenChannelToServerRsp
   # Ignore if not `accepted` above.
   serverToClientMqAbsNameOrEmpty @2 :SharedName;
   # Ignore if not `accepted` above.
+}
+
+struct GracefulSessionEnd
+{
+  # Side A sending this to side B means, "the Session object destructor in A has begun to execute, which means any
+  # user resources that must be freed before the session can fully close have indeed been freed."
+  # Session_base::Graceful_finisher doc header contains the explanation.  Spoiler alert: As of this writing this
+  # is needed, and used, only by SHM-jemalloc (shmTypeOrNone = jemalloc) sessions; and the "user resources that
+  # must be freed before the session can fully close" are handles (cross-process shared_ptr<>s) from
+  # session.session_shm()->construct<>()ed (where `session` is side B `Session` object) that have been
+  # .borrow_object()ed by side A.  So side A sending this to side B is saying, "they're calling out dtor, so
+  # they have to have freed any stuff they've borrowed from you, so you can now destroy your Session object including
+  # this SHM arena."  But do see aforementioned doc header which explores it more methodically.
+
+  # No fields necessary for now.
 }
 
 struct ProtocolNegotiation

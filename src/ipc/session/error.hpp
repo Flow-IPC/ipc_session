@@ -110,6 +110,9 @@ enum class Code
    */
   S_RESOURCE_OWNER_UNEXPECTED,
 
+  /// The opposing end of the session in question has been closed gracefully by the user invoking the end-session API.
+  S_SESSION_FINISHED,
+
   /// SENTINEL: Not an error.  This Code must never be issued by an error/success-emitting API; I/O use only.
   S_END_SENTINEL
 }; // enum class Code
