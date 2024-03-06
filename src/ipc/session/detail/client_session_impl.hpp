@@ -881,7 +881,7 @@ private:
    *
    * @see Session_base::Graceful_finisher doc header for all the background ever.
    */
-  std::optional<Base::Graceful_finisher> m_graceful_finisher;
+  std::optional<typename Base::Graceful_finisher> m_graceful_finisher;
 }; // class Client_session_impl
 
 // Free functions: in *_fwd.hpp.
