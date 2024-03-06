@@ -518,7 +518,7 @@ protected:
    * onto thread W, and that same class's dtor being invoked by the user in thread U.  There is a short time period,
    * when thread W (#m_async_worker) is active -- `*this` is still intact -- but the subclass's members are being
    * destroyed by its dtor.  In that case dtor_async_worker_stop() would be called by the subclass dtor to put an
-   * end to async shenanigans in thread W, so it cano continue destroying self in peace.  When there is no subclass,
+   * end to async shenanigans in thread W, so it can continue destroying self in peace.  When there is no subclass,
    * our own dtor does so.
    */
   void dtor_async_worker_stop();

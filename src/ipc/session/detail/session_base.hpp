@@ -35,7 +35,7 @@ namespace ipc::session
  * Internal type containing data and types common to internal types Server_session_impl and Client_session_impl
  * which are the respective true cores of #Server_session and #Client_session respectively.
  *
- * A #Server_session and Client_session_impl share many basic properties, some public.  For example consider
+ * A Server_session_impl and Client_session_impl share many basic properties, some public.  For example consider
  * that a Server_session_impl on this side has 1 counterpart Client_session_impl on the other side (or vice versa); for
  * both it is salient which Server_app is on the server side and which Client_app is on the client side.
  * In terms of types/constants, on each side the two Session objects must be identically configured via various
@@ -434,7 +434,7 @@ protected:
   void set_on_err_func(flow::async::Task_asio_err&& on_err_func_arg);
 
   /**
-   * Returns `true` if and only if set_on_err_func() has been called, or .
+   * Returns `true` if and only if set_on_err_func() has been called.
    * @return See above.
    */
   bool on_err_func_set() const;
