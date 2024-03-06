@@ -33,11 +33,13 @@ class Session_base;
 
 template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
          schema::ShmType S_SHM_TYPE_OR_NONE = schema::ShmType::NONE,
-         size_t S_SHM_MAX_HNDL_SZ = 0>
+         size_t S_SHM_MAX_HNDL_SZ = 0,
+         bool S_GRACEFUL_FINISH_REQUIRED_V = false>
 class Server_session_impl;
 
 template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE = schema::ShmType::NONE>
+         schema::ShmType S_SHM_TYPE_OR_NONE = schema::ShmType::NONE,
+         bool S_GRACEFUL_FINISH_REQUIRED_V = false>
 class Client_session_impl;
 
 template<typename Server_session_t>

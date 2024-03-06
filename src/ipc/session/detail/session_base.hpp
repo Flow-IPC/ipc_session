@@ -25,6 +25,7 @@
 #include "ipc/transport/struc/channel.hpp"
 #include "ipc/transport/native_socket_stream_acceptor.hpp"
 #include "ipc/transport/sync_io/native_socket_stream.hpp"
+#include <boost/thread/future.hpp>
 
 namespace ipc::session
 {
@@ -45,6 +46,14 @@ namespace ipc::session
  * Regarding data: an operational (PEER-state) Session (on either end) will need various members to be set
  * before it is indeed in PEER state.  This object stores such data, usually unset at first, and features
  * `protected` setters to invoke once each, until all are set permanently for PEER state.
+ *
+ * Session_base also has a `protected` inner class, Session_base::Graceful_finisher which certain variations
+ * (for which this is necessary) of Server_session_impl and Client_session_impl use to carry out a
+ * graceful-session-end handshake procedure.  This is here in Session_base -- despite being somewhat more
+ * algorithmic/stateful than the other stuff here -- essentially because the Graceful_finisher (if needed at
+ * all) on each side acts completely symmetrically.  Other items tend to be (internally) asymmetrical in
+ * behavior between Server_session_impl and Client_session_impl (and variants).  More info on
+ * Session_base::Graceful_finisher in its own doc header.
  *
  * @tparam Mdt_payload
  *         See #Server_session, #Client_session (or Session concept).
@@ -233,6 +242,250 @@ public:
   const Server_app& m_srv_app_ref;
 
 protected:
+  // Types.
+
+  /**
+   * Optional to use by subclasses, this operates a simple state machine that carries out a graceful-session-end
+   * handshake procedure.  A particular Client_session_impl and symmetrically its opposing Server_session_impl
+   * shall instantiate a `*this` internally and invoke its methods on certain events, as described in their
+   * contracts.
+   *
+   * Now we explain what we're solving (Rationale); then how we solve it (Design).  The latter is much simpler,
+   * we think, to understand then the former.  Hence apologies in advance for the length of "Rationale" section.
+   *
+   * ### Rationale ###
+   * Consider a particular Client_session_impl + Server_session_impl class/object pair, A and B.  In this case --
+   * which is somewhat unusual (relative to most internal `Session` algorithms) but in a good, simplifying way --
+   * it does not matter which is A and which is B.  So let's say A is us and B is the opposing guy.
+   *
+   * Also, for now, assume these are just the vanilla ones: session::Client_session_impl and
+   * session::Server_session_impl; not SHM-enabled -- no SHM arenas in play.
+   *
+   * Consider what happens when A dtor is invoked, in PEER state.  The session ends, and the session-end trigger is us.
+   * Without Graceful_finisher what happens is as follows.  The #Master_structured_channel in `*this` is closed;
+   * and then `*this` goes away altogether right away/synchronously.  Soon B's #Master_structured_channel
+   * throws the graceful-close error; B itself correctly interprets this as a session-end trigger; and B throws
+   * an error via the `Session` error handler.  Now, the user is told by docs they informally *should* destroy
+   * the B (invoke its dtor) ASAP, but nothing is formally forcing them to; it can sit around.  It will never
+   * accept channel passive-opens; `open_channel()` will no-op / return null; etc.  It is useless, but it can stay
+   * around.  Eventually B dtor will be invoked by user; it'll basically clean up data structures, and that's that.
+   *
+   * There is no problem there: A dtor and B dtor can run at quite different times, or more precisely B dtor
+   * can run much later than A dtor which triggered session-end.  Nothing bad happens.
+   *
+   * Now we'll discuss this in specific terms around actual `Client/Server_session_impl` variants that do exist
+   * at this time.  We could try to be formal and general, but it's easier to just be specific for exposition
+   * purposes.
+   *
+   * Take, now, the shm::classic::Client_session_impl shm::classic::Server_session_impl variants.  The above
+   * generally holds, but there are now SHM arenas in play.  We can forget about the app-scope arenas right off
+   * the bat: That guy stays around as long as the `Session_server` does, and that guy is formally required
+   * to be around until all child `Session`s have been destroyed.  So only session-scope arenas -- the ones
+   * inside A and B -- are relevant.  In fact, for SHM-classic there really is only *one* arena: A holds a
+   * handle to it (`a.session_shm()` points to it), and B does so symmetrically.
+   *
+   * Now reconsider the scenario above: A dtor runs.  (Insert vanilla `*_session_impl` text from above here.)
+   * Also, though, A dtor will remove the underlying SHM-pool by its name.  (This is possibly a lie.  This is
+   * technically so, only if A is a `Server_session_impl`; we've assigned the task to the server side as of this
+   * writing.  But this technicality is irrelevant: unlinking the SHM-pool doesn't blow up the other side's
+   * access to the arena; it remains in RAM until that guy closes.  So just bear with us here.)  Then indeed
+   * B dtor can run sometime later.  Is there a problem?  For SHM-classic, which is what we're discussing, no:
+   * The arena -- 1 shared SHM-pool in this case -- stays alive, until B's handle gets closed by B dtor.
+   * What about allocations/deallocations?  No problem there either: By contract, the A user *must* drop all
+   * cross-process `shared_ptr` handles to objects that it owns, before invoking A dtor; so A is fine, and the
+   * internal cross-process ref-counts for each A-held object get decremented by 1, due to the `shared_ptr` handles
+   * being nullified by the user by contract.  (For context: The guided manual `session_app_org` page describes
+   * to the reader how to structure their program, so that this is guaranteed.  In short, declare the object
+   * handle data members in their code after the `Session` data member, so they get deinitialized in the reverse
+   * order, in the user's hypothetical recommended `App_session` class.)  Isn't there a problem in B, though?  No:
+   * the B user shall drop *its* `shared_ptr` handles, before invoking B dtor; this will drop their internal
+   * cross-process ref-counts to 0; at which point shm::Pool_arena logic will deallocate those objects.  Deallocation
+   * is entirely distributed between A and B; in this scenario B's handles just happen to live longer and therefore
+   * happen to be the ones triggering the deallocations -- by the B process itself, synchronously.
+   * A is not "in charge" of deallocations of anything in any special way; it doesn't matter which process originally
+   * allocated a given object either.  That's the beauty/simplicity of SHM-classic.  (There are of course trade-offs
+   * in play; this is worse for segregation/safety... see Manual and such.)
+   *
+   * Now we come to the point.  Consider session::shm::arena_lend::jemalloc::Client_session_impl and
+   * `Server_session_impl`.  There *is* a problem.  Interestingly this time it really does *not* matter whether
+   * A is server or client-side.  In SHM-jemalloc the session-scope arenas are not 1 but 2:
+   * A has an arena, from which process A can allocate, and in which process A shall deallocate.
+   * B has an arena, from which process B can allocate, and in which process B shall deallocate.
+   * If B borrows object X from A, and is later done with it -- the `shared_ptr` local ref-count reached 0 --
+   * SHM-jemalloc-arranged `shared_ptr` deleter will send an internal message over a special channel to A.
+   * A will deallocate X once that has occurred, *and* any A-held `shared_ptr` group for X has also reached
+   * ref-count 0 (which may have happened before, or it may happen later).  Exactly the same is true of A borrowing
+   * from B, conversely/symmetrically.
+   *
+   * The problem is this: Suppose B holds a borrowed handle X (to an A-allocated object).  Now A dtor runs;
+   * its `.session_shm()` arena -- its constitutent SHM-pools! -- is destroyed.  That in itself shouldn't be
+   * a problem; again B presumably holds a SHM-pool handle, so it won't just disappear from RAM under it.
+   * I (ygoldfel) am somewhat fuzzy on what exactly happens (not being the direct author of SHM-jemalloc), but
+   * basically as I understand it, in destroying the arena, a bunch of jemalloc deinit steps execute; perhaps
+   * heap-marker data structures are modified all over the place... it's chaos.  The bottom line is:
+   * A arena gets mangled, so the B-held borrowed handle X has a high chance of pointing, now, to garbage:
+   * Not unmapped garbage; not into a SHM-pool that's magically gone -- it's still there -- so there's not necessarily
+   * a SEGV as a result; just garbage in the ~sense of accessing `free()`d (not un-`mmap()`ped) memory.
+   *
+   * All that is to say: A dtor runs; and user handle to object X in B instantly becomes unusable.
+   * For example, I (ygoldfel) have observed a simple thing: A SHM-jemalloc-backed struc::Msg_in received from
+   * A, in B, was absolutely fine.  Then it was running a long tight-loop verification of its contents -- verifying
+   * hashes of millions of X-pointed objects in SHM, preventing B dtor from running.  Meanwhile, A in a test program
+   * had nothing more to do and ran A dtor (closed session).  Suddenly, the hash-verifier was hitting hash
+   * mismatches, throwing capnp exceptions in trying to traverse the message, and so on.
+   *
+   * What this means, ultimately is straightforward: A dtor must not destroy its SHM-jemalloc arena
+   * (as accessible normally through `.session_shm()`), until not just *A* user has dropped all its object
+   * `shared_ptr` handles; but *B* user -- that's in the other process, B -- has as well!  How can we enforce
+   * this, though?  One approach is to just put it on the user: Tell them that they must design their protocol
+   * in such a way as to arrange some kind of handshake, as appropriate, beyond which each side knows for a fact
+   * that the session objects, and therefore arenas, are safe to destroy.
+   *
+   * We don't want to do that for obvious reasons.  What we already tell them should be sufficient: If you get
+   * a session-hosing error handler execution in your `Session`, then don't use that `Session`, and you should
+   * destroy it ASAP, for it is useless, and the other side's `Session` is not long for this life.  If they
+   * listen to this, then A dtor will soon be followed by B dtor anyway.  It might be delayed by some long
+   * tight-loop operation such as the test-program hash-verifying scenario above, but generally users avoid such
+   * things; and when they don't they can expect other things to get blocked, possibly in the opposing process.
+   * Subjectively, weird blocking -- caused by the other side acting pathologically -- is a lot more acceptable
+   * at session-start or session-end than something like that occuring mid-session.
+   *
+   * So what's the exact proposal?  It's this: If A dtor begins executing, it must first block until it knows
+   * B dtor has begun executing; but once it does know that, it knows that all B-held object handles have been
+   * dropped -- which is what we want.  (It would be possible for B user to indicate it some other way -- another
+   * API call, short of destruction -- but that seems unnecessarily complex/precious.  If the session is finished,
+   * then there's no reason to keep the `Session` object around = the overall policy we've pursued so far, so why
+   * make exceptions for this?)
+   *
+   * To be clear, this means certain behavior by B user can cause A dtor to block.  We can explain this in the docs,
+   * of course, but perhaps much more effective is to make it clear in the logs: say the wait begins here and what
+   * it'll take for it to end; and say when it has ended and why.
+   *
+   * Also to be clear, Graceful_finisher should be used only in `*_session_impl` pairs that actually have this
+   * problem; so of the 3 pairs we've discussed above -- only SHM-jemalloc's ones.  The others can completely
+   * forego all this.
+   *
+   * ### Design / how to use ###
+   * How to use: Subclass shall create a `*this` if and only if the feature is required; it shall call its methods
+   * and ctor on certain events, as prescribed in their doc headers.
+   *
+   * Design: All this assumes PEER state.  Now:
+   *
+   * Again let's say we're A, and they're B -- and just like we are.  Our goal is to ensure A dtor, at its
+   * start, blocks until B dtor has started executing; and to give their side the information necessary to do the
+   * same.  That's on_dtor_start(): the method that'll do the blocking; when it returns the dtor of subclass can
+   * proceed.  So what's needed for on_dtor_start() to `return`?  One, A dtor has to have started -- but that's true
+   * by the contract of when the method is called; two, B dtor has to have started.  How do we get informed of the
+   * latter?  Answer: B sends a special message along the #Master_structured_channel, from its own on_dtor_start().
+   * Naturally, we do the same -- in full-duplex fashion in a sense -- so that they can use the same logic.  So then
+   * the steps in on_dtor_start() are:
+   *   -# Send `GracefulSessionEnd` message to B, if possible (#Master_structured_channel is up, and the send
+   *      op doesn't return failure).
+   *   -# Perform `m_opposing_session_done.get_future().wait()`, where `m_opposing_session_done` is a `promise<void>`
+   *      that shall be fulfilled on these events (and only if it hasn't already been fulfilled before):
+   *      - The #Master_structured_channel has received `GracefulSessionEnd` *from* B.
+   *      - The #Master_structured_channel has emitted a channel-hosing error.
+   *
+   * Notes:
+   *   - The mainstream case is receiving `GracefulSessionEnd`: In normal operation, with no acts of god, we will no
+   *     longer destroy the session-master-channel, until returning from on_dtor_start().
+   *     - This could happen after the `.wait()` starts -- meaning A dtor indeed ran before B dtor (our side is
+   *       the one triggering session-end).
+   *     - It could just as easily happen *before* the `.wait()` starts -- meaning the reverse.  Then `.wait()`
+   *       will return immediately.
+   *   - Of course who knows what's going on -- the #Master_structured_channel could still go down without
+   *     the `GracefulSessionEnd`.  Is it really right to treat this the same, and let on_dtor_start() return?
+   *     Answer: Yes.  Firstly, there's hardly any other choice: the channel's dead; there's no other way of knowing
+   *     what to wait for; and we can't just sit there cluelessly.  But more to the point, this means it's a
+   *     *not*-graceful scenario: Graceful_finisher can't hope to deal with it and can only proceed heuristically.
+   *     This is not networking; so we should have a pretty good level of predictability at any rate.
+   *
+   * Last but not least consider that by delaying the destruction of the #Master_structured_channel until after
+   * the dtor has started (assuming no channel-hosing acts of god), we've changed something: The error handler shall
+   * no longer inform the user of a session-end trigger from the other side!  Left alone this way, we've broken
+   * the whole system by introducing a chicken-egg paradox: We don't let our user be informed of the session-end
+   * trigger when would normally, so they won't call our dtor; but because they won't call our dtor, we'll never
+   * reach the point where the channel would get hosed and we'd know the inform the user.  How to fix this?
+   * The answer is pretty obvious: Receiving the `GracefulSessionEnd` shall now trigger a special graceful-session-end
+   * error.  Naturally this would only be usefully emitted if we're not in the dtor yet.
+   * So the latter situation should kick-off the user invoking our dtor sometime soon, hopefully; we'll send our
+   * `GracefulSessionEnd` to them; and so on.
+   */
+  class Graceful_finisher :
+    public flow::log::Log_context,
+    private boost::noncopyable
+  {
+  public:
+    // Constructors/destructor.
+
+    /**
+     * You must invoke this ctor (instantiate us) if and only if synchronized dtor execution is indeed required;
+     * and `*this_session` has just reached PEER state.  Invoke from thread W only.
+     *
+     * ### How `master_channel` shall be touched by `*this` ###
+     * We're being very explicit about this, since there's some inter-class private-state sharing going on...
+     * generally not the most stable or stylistically-amazing situation....
+     *   - This ctor will `.expect_msg(GRACEFUL_SESSION_END)`, so we can detect its arrival and mark it down as needed
+     *     and possibly invoke `this_session->hose()` to report it to the user.
+     *     Hence there's no method you'll need to call nor any setup like this needed on your part.
+     *   - on_dtor_start() will attempt to send `GracefulSessionEnd` to the opposing Graceful_finisher.
+     *
+     * @param logger_ptr
+     *        Logger to use for logging subsequently.  (Maybe `Session_base` should just subclass `Log_context`
+     *        for all os us?  Add to-do?)
+     * @param this_session
+     *        The containing Session_base.
+     * @param async_worker
+     *        The thread W of the containing `*_session_impl`.  `GracefulSessionEnd` handler is at least partially
+     *        invoked there (`hose(...)`); and on_dtor_start() posts onto it.
+     * @param master_channel
+     *        The containing `Session` master channel.  The pointee must exist until `*this` Graceful_finisher
+     *        is gone.
+     */
+    explicit Graceful_finisher(flow::log::Logger* logger_ptr, Session_base* this_session,
+                               flow::async::Single_thread_task_loop* async_worker,
+                               Master_structured_channel* master_channel);
+
+    // Methods.
+
+    /**
+     * Must be invoked if the `*_session_impl` detects that the master channel has emitted channel-hosing error.
+     *
+     * Invoke from thread W.
+     */
+    void on_master_channel_hosed();
+
+    /**
+     * The reason Graceful_finisher exists, this method must be called at the start of `*_session_impl` dtor; and
+     * will block until it is appropriate to let that dtor proceed to shut down the `*_session_impl`.
+     *
+     * Invoke from thread U, not thread W.
+     */
+    void on_dtor_start()
+
+  private:
+    // Data.
+
+    /// The containing Session_base.  It shall exist until `*this` is gone.
+    Session_base* const m_this_session;
+
+    /// The containing `Session` thread W loop.  It shall exist until `*this` is gone.
+    flow::async::Single_thread_task_loop* m_async_worker;
+
+    /// The containing `Session` master channel.  It shall exist until `*this` is gone.
+    Master_structured_channel* m_master_channel;
+
+    /**
+     * A promise whose fulfillment is a necessary and sufficient condition for on_dtor_start() returning
+     * (letting `Session` dtor complete).
+     *
+     * It is fulfilled once the #Master_structured_channel receives `GracefulSessionEnd` from opposing side
+     * (indicating the opposing on_dtor_start() has started) or got hosed (indicating we'll now never know this
+     * and must act as-if opposing on_dtor_start() has started).  See "Design" in our doc header.
+     */
+    boost::promise<void> m_opposing_session_done;
+  }; // class Graceful_finisher
+
   // Constants.
 
   /**
@@ -780,6 +1033,100 @@ typename CLASS_SESSION_BASE::Structured_msg_builder_config
 
   return Heap_fixed_builder::Config{ logger_ptr, sz, 0, 0 };
 } // Session_base::heap_fixed_builder_config()
+
+TEMPLATE_SESSION_BASE
+CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logger_ptr, Session_base* this_session,
+                                                         flow::async::Single_thread_task_loop* async_worker,
+                                                         Master_structured_channel* master_channel) :
+  flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
+  m_this_session(this_session),
+  m_async_worker(async_worker);
+  m_master_channel(master_channel)
+{
+  // We are in thread W.
+
+  m_master_channel->expect_msg(Master_structured_channel::Msg_which_in::GRACEFUL_SESSION_END,
+                               [this](auto&&)
+                               // (The message doesn't matter and contains no fields; only that we received it matters.)
+  {
+    // We are in thread Wc (unspecified, really struc::Channel async callback thread).
+    m_async_worker.post([this]()
+    {
+      // We are in thread W.  (We need to be to safely trigger hosed() and hose().)
+
+      FLOW_LOG_INFO("Received GracefulSessionEnd from opposing Session object along session master channel "
+                    "[" << *m_master_channel << "].  Will emit to local user as graceful-end "
+                    "error; and mark it down.  It our Session dtor is running, it shall return soon.  It it has "
+                    "not yet run, it shall return immediately once it does execute.");
+
+      m_opposing_session_done.set_value();
+      /* Can m_opposing_session_done already be set?  (That would throw promise exception, and we don't catch it
+       * above.)  Answer: no, in the current protocol at least: Only once can it be sent (hence .expect_msg(), not
+       * .expect_msgs()); and if *m_master_channel were to be hosed, then that would occur either after
+       * expect_msg() firing handler, or it would occur instead of it.  (We *do* handle the "after" case in
+       * on_master_channel_hosed(), where we do indeed catch the exception.) */
+
+      if (!m_this_session->hosed())
+      {
+        m_this_session->hose(error::Code::S_SESSION_FINISHED); // It'll log.
+      }
+    }); // m_async_worker.post()
+  }); // m_master_channel->expect_msg(GRACEFUL_SESSION_END)
+} // Session_base::Graceful_finisher::Graceful_finisher()
+
+TEMPLATE_SESSION_BASE
+void CLASS_SESSION_BASE::Graceful_finisher::on_master_channel_hosed()
+{
+  using boost::promise_already_satisfied;
+
+  // We are in thread W.
+  try
+  {
+    m_opposing_session_done.set_value();
+  }
+  catch (const promise_already_satisfied&)
+  {
+    // Interesting.  @todo Maybe log?
+  }
+} // } // Session_base::Graceful_finisher::on_master_channel_hosed()
+
+TEMPLATE_SESSION_BASE
+void CLASS_SESSION_BASE::Graceful_finisher::on_dtor_start()
+{
+  using flow::async::Synchronicity;
+
+  // We are in thread U.  In fact in we're in a Client/Server_session_impl dtor... but at its very start.
+
+  /* Thread W must be fine and running; per algorithm (see Graceful_finisher class doc header).
+   * It's only safe to access m_master_channel from there. */
+  m_async_worker->post([&]()
+  {
+    FLOW_LOG_INFO("In Session object dtor sending GracefulSessionEnd to opposing Session object along "
+                  "session master channel [" << *m_master_channel << "] -- if at all possible.");
+
+    auto msg = m_master_channel->create_msg();
+    msg.body_root()->initGracefulSessionEnd();
+
+    Error_code err_code_ignored;
+    m_master_channel->send(msg, nullptr, &err_code_ignored);
+    /* Whatever happened, it logged.  We make a best effort; it channel is hosed or send fails, then the other
+     * side shall detect it via its on_master_channel_hosed() presumably and set its m_opposing_session_done, hence
+     * its on_dtor_start() will proceed. */
+  }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker->post()
+
+  // That would've been non-blocking.  So now lastly:
+
+  FLOW_LOG_INFO("In Session object dtor we not await sign that the opposing Session object dtor has also started; "
+                "only then will we proceed with destroying our Session object: e.g., maybe they hold handles "
+                "to objects in a SHM-arena we would deinitialize.  If their dtor has already been called, we will "
+                "proceed immediately.  If not, we will now wait for that.  This would only block if the opposing "
+                "side's user code neglects to destroy Session object on error; or has some kind of blocking "
+                "operation in progress before destroying Session object.  "
+                "Session master channel: [" << *m_master_channel << "].");
+  m_opposing_session_done.get_future().wait();
+  FLOW_LOG_INFO("In Session object dtor: Done awaiting sign that the opposing Session object dtor has also started.  "
+                "Will now proceed with our Session object destruction.");
+} // Session_base::Graceful_finisher::on_dtor_start()
 
 TEMPLATE_SESSION_BASE
 typename CLASS_SESSION_BASE::Structured_msg_reader_config

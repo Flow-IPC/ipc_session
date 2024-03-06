@@ -138,6 +138,9 @@ std::string Category::message(int val) const // Virtual.
     return "A resource in the file system (file, SHM pool, MQ, etc.) has or could have unexpected owner; "
            "ipc::session may emit this when acquiring resources and/or opening session if the server process "
            "is not running as the configured user, or a previous iteration was not running as that user.";
+  case Code::S_SESSION_FINISHED:
+    return "The opposing end of the session in question has been closed gracefully by the user invoking the "
+           "end-session API.";
 
   case Code::S_END_SENTINEL:
     assert(false && "SENTINEL: Not an error.  "
@@ -179,6 +182,8 @@ util::String_view Category::code_symbol(Code code) // Static.
     return "SERVER_MASTER_LOG_IN_REQUEST_CONFIG_MISMATCH";
   case Code::S_RESOURCE_OWNER_UNEXPECTED:
     return "RESOURCE_OWNER_UNEXPECTED";
+  case Code::S_SESSION_FINISHED:
+    return "SESSION_FINISHED";
 
   case Code::S_END_SENTINEL:
     return "END_SENTINEL";

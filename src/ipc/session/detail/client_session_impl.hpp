@@ -207,10 +207,13 @@ namespace ipc::session
  *         See #Client_session counterpart.
  * @tparam S_SHM_TYPE_OR_NONE
  *         Identical to opposing Server_session_impl counterpart.
+ * @tparam S_GRACEFUL_FINISH_REQUIRED_V
+ *         `true` if and only if Session_base::Graceful_finisher must be used.
+ *         See its doc header for explanation when that would be the case.
  */
 template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES,
          typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE>
+         schema::ShmType S_SHM_TYPE_OR_NONE, bool S_GRACEFUL_FINISH_REQUIRED_V>
 class Client_session_impl :
   public Session_base<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
   public flow::log::Log_context
@@ -264,6 +267,9 @@ public:
 
   /// See Client_session_mv counterpart.
   static constexpr bool S_SOCKET_STREAM_ENABLED = Base::S_SOCKET_STREAM_ENABLED;
+
+  /// Short-hand for template parameter knob `S_GRACEFUL_FINISH_REQUIRED_V`: see class template doc header.
+  static constexpr bool S_GRACEFUL_FINISH_REQUIRED = S_GRACEFUL_FINISH_REQUIRED_V;
 
   // Constructors/destructor.
 
@@ -868,6 +874,14 @@ private:
    * It's a fairly small section of code though.
    */
   Master_structured_channel_ptr m_master_channel;
+
+  /**
+   * Null until PEER state is reached, and NULL unless compile-time #S_GRACEFUL_FINISH_REQUIRED is `true`,
+   * this is used to block at the start of dtor to synchronize with the opposing `Session` dtor for safety.
+   *
+   * @see Session_base::Graceful_finisher doc header for all the background ever.
+   */
+  std::optional<Base::Graceful_finisher> m_graceful_finisher;
 }; // class Client_session_impl
 
 // Free functions: in *_fwd.hpp.
@@ -949,7 +963,42 @@ void CLASS_CLI_SESSION_IMPL::dtor_async_worker_stop()
   FLOW_LOG_INFO("Client session [" << *this << "]: Shutting down.  Worker thread will be joined, but first "
                 "we perform session master channel end-sending op (flush outgoing data) until completion.  "
                 "This is generally recommended at EOL of any struc::Channel, on error or otherwise.  "
-                "This is technically blocking but unlikely to take long.");
+                "This is technically blocking but unlikely to take long.  Also a Graceful_finisher phase may "
+                "precede the above steps (it will log if so).");
+
+  // See Session_base::Graceful_finisher doc header for all the background ever.  Also: it logs as needed.
+  if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+  {
+    Base::Graceful_finisher* graceful_finisher_or_null = {};
+    m_async_worker.post([&]() // Have to access m_graceful_finisher (the optional<>) in thread W only.
+    {
+      // We are in thread W.
+      if (m_graceful_finisher)
+      {
+        graceful_finisher_or_null = &(m_graceful_finisher.value());
+      }
+    }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker.post()
+
+    /* If graceful_finisher_or_null is not null, then we're definitely in PEER state, and this is irreversible;
+     * so it's cool to ->on_dtor_start() on it.  It'll block as needed, etc.
+     *
+     * If it *is* null:
+     *   - If between the assignment above to null and the next statement, m_graceful_finisher did not become
+     *     non-empty, then there's no controversy: It's still not in PEER state; and there's no reason to
+     *     block dtor still.  So no need to do anything, and that's correct.  Can just continue.
+     *   - If however -- unlikely but possible -- in the last few microseconds (or w/e) indeed m_graceful_finisher
+     *     has become non-empty, then now *this is in PEER state.  Yet we still forego any ->on_dtor_start()
+     *     and just continue.  Is that wrong?  No: We are in dtor; and the changeover to PEER happened in dtor;
+     *     so user has had no chance to grab any resources (like borrowing SHM objects) that would need to
+     *     be released before dtor can really-destroy *this (like its SHM arena).  So it's still correct to just
+     *     continue. */
+    if (graceful_finisher_or_null)
+    {
+      graceful_finisher_or_null->on_dtor_start();
+      // OK, now safe (or as safe as we can guarantee) to blow *this's various parts away.
+    }
+  } // if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+
   /* @todo Consider adding blocking struc::Channel::sync_end_sending(), possibly with timeout.  There might be
    * a to-do in its or async_end_sending() class doc header.  Timeout would help us avoid blocking here, unlikely though
    * it is in practice probably.  A sync_ call(), regardless of that, would just be convenient resulting in less
@@ -1654,7 +1703,34 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_log_in_rsp
                    "Executing handler.");
     invoke_conn_on_done_func(err_code);
 
-    // That's it.  They can proceed with session work.
+    // That's it.  They can proceed with session work.  (Unless subclass just did a cancel_peer_state_to_*().)
+
+    /* See Session_base::Graceful_finisher doc header for all the background ever.
+     *
+     * Why didn't we do the following just above, after setting state to PEER?  It is indeed unusual to do something
+     * in thread W *after* invoking on-done handler.  The immediate reason is the possibility of subclass,
+     * not user, invoking cancel_peer_state_to_*() -- so we're not in PEER state "after all": but we will
+     * certainly then do it upon complete_async_connect_after_canceling_peer_state(<success>) reaching PEER state.
+     *
+     * Update: I (ygoldfel, who wrote this) am very uncomfortable with this.  This is a consequence of the, in
+     * retrospect, house-of-cards-like way vanilla Client_session_impl is reused by the SHM-based guys; and that's
+     * easily the biggest impl detail I regret to date -- the rest I'm quite happy with really.
+     * So I'm addeding an assert here -- and I know as of this writing it won't trip, simply because
+     * S_GRACEFUL_FINISH_REQUIRED is true only for SHM-jemalloc, and SHM-jemalloc will 100%
+     * do cancel_peer_state_to_connecting() inside on_done_func() (as of this writing).  So rather than execute
+     * code I am skeptical about, safety-wise (kind of thing that'll work 99.9999% of the time at least, but
+     * is just too weird), I'll blow up if somehow later changes dislodge this balance.
+     *
+     * @todo OMG, rejigger how vanilla Client_session_impl is reused by the SHM-based subclasses: This "undo PEER
+     * state paradigm" is just ridiculous.  We can do better than this. */
+    if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+    {
+      assert((m_state != State::S_PEER) &&
+             "In practice only SHM-jemalloc should use GRACEFUL_FINISH_REQUIRED=true, and that guy should have "
+               "canceled PEER state via cancel_peer_state_to_connecting() at best; see above comment and to-do.");
+      // Commented out: m_graceful_finisher.emplace(get_logger(), this, &m_async_worker, m_master_channel.get());
+    }
+
   } // // if (n_init_channels == 0)
   else // if (n_init_channels != 0)
   {
@@ -1837,11 +1913,22 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_init_open_channel
   // Halle-freakin'-lujah!
 
   m_state = State::S_PEER;
+
   FLOW_LOG_TRACE("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
                  "async-connect succeded, and the log-in within the resulting channel succeeded, and the init-channel "
                  "opening succeeded.  Executing handler.");
   invoke_conn_on_done_func(err_code);
-  // That's it.  They can proceed with session work.
+
+  // That's it.  They can proceed with session work.  (Unless subclass just did a cancel_peer_state_to_*().)
+
+  // Same stuff as in the no-init-channels path, where state becomes PEER.  *Please* see key comments there.
+  if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+  {
+    assert((m_state != State::S_PEER) &&
+           "In practice only SHM-jemalloc should use GRACEFUL_FINISH_REQUIRED=true, and that guy should have "
+             "canceled PEER state via cancel_peer_state_to_connecting() at best; see above comment and to-do.");
+    // Commented out: m_graceful_finisher.emplace(get_logger(), this, &m_async_worker, m_master_channel.get());
+  }
 } // Client_session_impl::on_master_channel_init_open_channel()
 
 TEMPLATE_CLI_SESSION_IMPL
@@ -1911,14 +1998,19 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_error
   assert(m_state == State::S_PEER);
   /* Session master channel reported channel-hosing incoming-direction error.  Emit it to user if and only if
    * we haven't already emitted some error.  If we have, it shouldn't have come from either
-   * m_master_channel->send() (synchronously) or a previous on_master_channel_error(): struc::Channel promises
+   * m_master_channel->send()/etc. (synchronously) or a previous on_master_channel_error(): struc::Channel promises
    * to emit any channel-hosing error at most once, through exactly one of those mechanisms.  It is still
    * possible, though: There are sources of error/Error_codes emitted in *this Client_session that don't come
    * from m_master_channel but our own logic.  (As of this writing, I believe, that was only actually before PEER
-   * state; but that could easily changed as we maintain the code.) */
+   * state; but that could easily change as we maintain the code.) */
   if (!Base::hosed())
   {
     Base::hose(err_code);
+  }
+
+  if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+  {
+    m_graceful_finisher->on_master_channel_hosed();
   }
 } // Client_session_impl::on_master_channel_error()
 
@@ -2480,6 +2572,12 @@ void CLASS_CLI_SESSION_IMPL::complete_async_connect_after_canceling_peer_state(c
     FLOW_LOG_INFO("Client session [" << *this << "]: Post-vanilla-success portion of async-connect also succeeded.  "
                   "Will go to PEER state and report to user via on-async-connect handler.");
     m_state = State::S_PEER;
+
+    // See Session_base::Graceful_finisher doc header for all the background ever.
+    if constexpr(S_GRACEFUL_FINISH_REQUIRED)
+    {
+      m_graceful_finisher.emplace(get_logger(), this, &m_async_worker, m_master_channel.get());
+    }
   }
 
   invoke_conn_on_done_func(err_code_or_success);
