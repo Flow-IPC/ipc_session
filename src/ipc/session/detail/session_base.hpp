@@ -455,14 +455,26 @@ protected:
    * Not unmapped garbage; not into a SHM-pool that's magically gone -- it's still there -- so there's not necessarily
    * a SEGV as a result; just garbage in the ~sense of accessing `free()`d (not un-`mmap()`ped) memory.
    *
-   * All that is to say: A dtor runs; and user handle to object X in B instantly becomes unusable.
-   * For example, I (ygoldfel) have observed a simple thing: A SHM-jemalloc-backed struc::Msg_in received from
-   * A, in B, was absolutely fine.  Then it was running a long tight-loop verification of its contents -- verifying
-   * hashes of millions of X-pointed objects in SHM, preventing B dtor from running.  Meanwhile, A in a test program
-   * had nothing more to do and ran A dtor (closed session).  Suddenly, the hash-verifier was hitting hash
-   * mismatches, throwing capnp exceptions in trying to traverse the message, and so on.
+   * (Update: I've spoken to the SHM-jemalloc author echan, and the above is basically right with a couple
+   * clarifications.  It's not so much that the arena object being destroyed is the issue; in fact that in itself would
+   * be handled gracefully by SHM-jemalloc innards; they will keep the arena around, even if the outer object goes away
+   * (or more precisely as of this writing the arena-handle -- a `shared_ptr` -- does), while it knows things are
+   * pointing into it, even borrowed things in another process.  Really it's the fact that we kill the *channel*
+   * it uses to communicate with the borrower process: the arena is told there's nothing out there pointing into
+   * it: locally the user has to have dropped all constructed-object handles; and the borrower process it no
+   * longer has a way of contacting it; so it assumes tgat guy's done/gone, as are all the borrowed handles in it.
+   * That clarification doesn't change the situation though: Whether it's the SHM-jemalloc-session, or the
+   * SHM-jemalloc-session-used-channel, or the SHM-jemalloc-arena going away that makes borrowed objects unusable --
+   * they are unusable, is the bottom line.)
    *
-   * What this means, ultimately is straightforward: A dtor must not destroy its SHM-jemalloc arena
+   * All that is to say: A dtor runs; and user handle to object X in B instantly becomes unusable.
+   * For example, I (ygoldfel) have observed a simple thing: A SHM-jemalloc-backed transport::struc::Msg_in received
+   * from A, in B, was absolutely fine.  Then it was running a long tight-loop verification of its contents -- verifying
+   * hashes of millions of X-pointed objects in SHM, preventing B dtor from running.  Meanwhile, A in a test program
+   * had nothing more to do and ran A dtor (closed session).  Suddenly, the hash-verifier code in the tight loop
+   * was hitting hash mismatches, throwing capnp exceptions in trying to traverse the message, and so on.
+   *
+   * What this means, ultimately, is straightforward: A dtor must not destroy its SHM-jemalloc arena
    * (as accessible normally through `.session_shm()`), until not just *A* user has dropped all its object
    * `shared_ptr` handles; but *B* user -- that's in the other process, B -- has as well!  How can we enforce
    * this, though?  One approach is to just put it on the user: Tell them that they must design their protocol
@@ -492,6 +504,27 @@ protected:
    * Also to be clear, Graceful_finisher should be used only in `*_session_impl` pairs that actually have this
    * problem; so of the 3 pairs we've discussed above -- only SHM-jemalloc's ones.  The others can completely
    * forego all this.
+   *
+   * @todo Consider how to avoid having SHM-jemalloc ipc::session mechanism require one side's `Session` dtor
+   * await (and possibly block) the start of the opposing side's `Session` dtor, before it can proceed.  The
+   * reason it does this today is above this to-do in the code.  The blocking is not too bad -- if the user's
+   * applications are properly written, it will not occur, and the existing logging should make clear why it
+   * happens, if it happens; but it's still not ideal.  There are a couple known mitigating approaches,
+   * and at least 1 ticket covering them is likely filed.  (Either way the Graceful_finisher mechanism could
+   * then be removed probably.)  To summarize them: 1, there can be a mechanism deep inside SHM-jemalloc code that gives
+   * (arbitrarily long, configurable) grace period for known borrowed objects whose session channels
+   * have closed before those objects were returned; this was echan's idea on this topic.  Once the grace period
+   * is reached, it would act as-if they got returned then (so in the above scenario the arena could get
+   * jemalloc-deinitialized and all).  If program needs to exit, it could either block until the end of the
+   * grace period or... who knows?  2, something similar could be done about the SHM-internal-use channel:
+   * do not close it but add it to some list of such channels; they would be finally closed upon detection of
+   * the other side's `Session` dtor being reached, in some background thread somewhere.  (On 2nd thought
+   * this sounds a lot like Graceful_finisher -- but for this particular internal-use channel only.  The code
+   * here would only get more complex, thought maybe not too much more.  However, it would resolve the observed
+   * `Session`-dtor-blocking user-visible issue, at least until the delayed-channel-death process had to exit
+   * entirely.)  Beyond these basic ideas (which could even perhaps be combined) this requires some thinking;
+   * it is an interesting problem.  In the meantime the dtor-cross-process-barrier-of-sorts existing solution is
+   * pretty decent.
    *
    * ### Design / how to use ###
    * How to use: Subclass shall create a `*this` if and only if the feature is required; it shall call its methods
