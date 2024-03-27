@@ -1651,7 +1651,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
 
     FLOW_LOG_INFO("Server session [" << *this << "]: Accept-log-in request: We have the freshly-accepted "
                   "master socket stream [" << m_master_sock_stm << "]; "
-                  "Wrapping in 1-pipe Channel; then wrapping that in a direct-heap-serializing struc::Channel; "
+                  "wrapping in 1-pipe Channel; then wrapping that in a direct-heap-serializing struc::Channel; "
                   "then waiting until log-in request arrives; and only then we will send response, at which point "
                   "we will issue the user handler indicating the session is ready.");
 
