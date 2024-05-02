@@ -364,7 +364,8 @@ private:
     /**
      * The set of all #Incomplete_session objects such that each one comes from a distinct async_accept() request
      * that (1) has accepted a transport::sync_io::Native_socket_stream connection and thus created a
-     * #Server_session_dtl_obj but (2) whose Server_session_dtl::async_accept() has not yet completed (fired handler).
+     * #Server_session_dtl_obj but (2) whose Server_session_dtl::async_accept_log_in() has not yet completed (fired
+     * handler).
      *
      * Protected by #m_mutex; accessed from thread Wa and threads Ws.  See class doc header impl section for
      * discussion of thread design.
