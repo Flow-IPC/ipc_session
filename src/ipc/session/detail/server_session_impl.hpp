@@ -744,7 +744,7 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
      *     block dtor still.  So no need to do anything, and that's correct.  Can just continue.
      *   - If however in the last few microseconds (or w/e) indeed m_graceful_finisher
      *     has become non-empty, then now *this is in PEER state.  ...NOPE!  The only way that can happen
-     *     for us -- unlike Client_session_impl as of this writing -- is via init_handlers(), which they user
+     *     for us -- unlike Client_session_impl as of this writing -- is via init_handlers(), which the user
      *     themselves must execute.  So actually graceful_finisher_or_null remains accurate from up above
      *     to the next statement.  */
     if (graceful_finisher_or_null)

@@ -54,7 +54,7 @@ namespace ipc::session::sync_io
  *       The type of this object shall be Session_server_adapter::Session_obj; it shall be a concrete
  *       type of the class template Session_server_adapter.
  *   - On successful accept:
- *     - See doc header for Session_server_adapter on what to do next.  Spoiler alert:
+ *     - See doc header for Server_session_adapter on what to do next.  Spoiler alert:
  *       Server_session_adapter::start_ops(),
  *       then Server_session_adapter::init_handlers() (mirroring a vanilla `Server_session`).
  *     - Use `core()->` for all other API needs (e.g., shm::classic::Session_server::app_shm()).
