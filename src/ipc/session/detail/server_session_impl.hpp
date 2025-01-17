@@ -1081,8 +1081,7 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
 
   // We are in thread U.
 
-  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, Server_session_impl::open_channel,
-                                     target_channel, flow::util::bind_ns::cref(mdt), _1);
+  FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, open_channel, target_channel, mdt, _1);
   // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
   if (!mdt)
