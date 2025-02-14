@@ -29,7 +29,7 @@ namespace ipc::session
 
 /**
  * Implements Session concept on the Client_app end: a Session_mv that first achieves PEER state by connecting
- * to an opposing Session_server_mv via Client_session_mv::sync_connect().  See overview of Session hierarchy
+ * to an opposing Session_server via Client_session_mv::sync_connect().  See overview of Session hierarchy
  * in namespace ipc::session doc header; then come back here if desired.
  *
  * It is unusual to use Client_session_mv template directly.  If you do wish to set up a client-side session peer,
@@ -43,7 +43,7 @@ namespace ipc::session
  * (hence Client_session_mv to which it aliases) is its super-class, and until PEER state is reached its API
  * remains the only relevant API to use.  Once Client_session_mv::sync_connect() puts `*this` into PEER
  * state, super-class Session_mv (= Session concept) API continues to be relevant.  Also in PEER state
- * SHM-relevant additional API members (e.g., shm::classic::Session_mv::app_shm()`) become of interest.
+ * SHM-relevant additional API members (e.g., shm::classic::Session_mv::app_shm()) become of interest.
  *
  * Summary hierarchy:
  *   - Session_mv (Session concept impl)
@@ -80,7 +80,7 @@ namespace ipc::session
  *     when the opposing side invokes open_channel().
  *   - However it is possible to configure either side to not accept passive-opens; meaning to be useful
  *     such a side shall be exclusively doing open_channel() (active-opens).  One might conclude, then, that
- *     Server_session should be passive-opening, while #Client_session should be active-opening.
+ *     #Server_session should be passive-opening, while #Client_session should be active-opening.
  *     That is *not* the case.  In PEER state established on both sides, the 2 sides are identical in this
  *     respect.  If both sides are configured to accept passive-opens, then there's no question.
  *     If one side is so configured, it can be either side.  If both sides are so configured, the session is useless,
