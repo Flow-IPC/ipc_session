@@ -205,8 +205,8 @@
  * with a B1 or B2 is likely to be quite different from same with a C1 or C2 or C3.  If only split A-B is relevant
  * to A, then that is not a concern.)
  *
- * As noted, in terms of per-session shared resources, most notably channel communication, a Server_session and
- * Client_session have identical APIs with identical capabilities, each implementing the PEER-state Session concept
+ * As noted, in terms of per-session shared resources, most notably channel communication, a `Server_session` and
+ * `Client_session` have identical APIs with identical capabilities, each implementing the PEER-state Session concept
  * to the letter.
  *
  * ### SHM ###
@@ -218,7 +218,7 @@
  * ipc::session APIs feature exactly the following asynchronous (blocking, background, not-non-blocking, long...)
  * operations:
  *   - ipc::session::Session on-error and (optionally) on-passive-channel-open handlers.
- *   - `ipc::session::Client_session::async_conenct()` (same for other, including SHM-aware, variants).
+ *   - `ipc::session::Client_session::async_connect()` (same for other, including SHM-aware, variants).
  *   - ipc::session::Session_server::async_accept() (same for SHM-aware variants).
  *
  * All APIs mentioned so far operation broadly in the async-I/O pattern: Each event in question is reported from
