@@ -450,6 +450,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
   using util::Process_credentials;
   using transport::sync_io::Native_socket_stream;
   using flow::error::Runtime_error;
+  using flow::async::reset_this_thread_pinning;
   using boost::movelib::make_unique;
   using boost::system::system_category;
   using boost::io::ios_all_saver;
@@ -461,9 +462,13 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
 
   // Finish setting up m_state.  See State members in order and deal with the ones needing explicit init.
   m_state->m_last_cli_namespace = 0;
-  m_state->m_incomplete_session_graveyard = boost::movelib::make_unique<flow::async::Single_thread_task_loop>
-                                              (get_logger(),
-                                               flow::util::ostream_op_string("srv_sess_acc_graveyard[", *this, "]"));
+  m_state->m_incomplete_session_graveyard
+    = boost::movelib::make_unique<flow::async::Single_thread_task_loop>
+        (get_logger(),
+         /* (Linux) OS thread name will truncate the this-addr snippet to 15-5=10 chars here;
+          * which should actually just fit.  Nothing else seems particularly useful;
+          * like in non-exotic setups our srv-name is pretty much known. */
+         flow::util::ostream_op_string("SSvG-", this));
 
   /* This is a (as of this writing -- the) *cleanup point* for any MQs previously created on behalf of this
    * Server_app by previous active processes before us; namely when either a Server_session or opposing Client_session
@@ -707,7 +712,8 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
   // See class doc header.  Start this very-idle thread for a bit of corner case work.
   if (err_code && (!*err_code))
   {
-    m_state->m_incomplete_session_graveyard->start();
+    m_state->m_incomplete_session_graveyard->start(reset_this_thread_pinning);
+    // Don't inherit any strange core-affinity!  ^-- Worker must float free.
   }
   // else { Might as well not start that thread. }
 } // Session_server_impl::Session_server_impl()

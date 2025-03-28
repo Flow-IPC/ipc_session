@@ -918,12 +918,21 @@ CLASS_CLI_SESSION_IMPL::Client_session_impl(flow::log::Logger* logger_ptr,
 
   m_last_actively_opened_channel_id(0),
   m_last_passively_opened_channel_id(0),
-  m_async_worker(get_logger(), flow::util::ostream_op_string("cli_sess[", *this, ']'))
+  m_async_worker(get_logger(),
+                 /* (Linux) OS thread name will truncate the "srv<cli" names snippet to 15-5=10 chars here;
+                  * something decently-useful will probably get cut-off; so try to put the key parts up-front:
+                  * that we're part of a session::Client_session impl; and the SHM type or none (0) (perhaps
+                  * the distinction between "none" and "yes, SHM-enabled" is the useful part in most cases).
+                  * After that in non-exotic setups our cli-name is pretty much known anyway, while targeting
+                  * 2+ server-apps isn't that crazy and an official use-case; so put srv-name first. */
+                 flow::util::ostream_op_string("ClS", int(S_SHM_TYPE), '-',
+                                               srv_app_ref.m_name, '<', cli_app_ref.m_name))
 {
   // INFO level would've been okay, but let's just save it for async_connect() which is likely coming soon.
   FLOW_LOG_TRACE("Client session [" << *this << "]: Created.  The session-connect attempt not yet requested.  "
                  "Worker thread starting, will idle until session-connect.");
-  m_async_worker.start();
+  m_async_worker.start(flow::async::reset_this_thread_pinning);
+  // Don't inherit any strange core-affinity!  ^-- Worker must float free.
 }
 
 TEMPLATE_CLI_SESSION_IMPL
