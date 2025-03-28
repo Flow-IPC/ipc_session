@@ -693,7 +693,15 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
   m_last_passively_opened_channel_id(0),
   m_last_actively_opened_channel_id(0),
   m_last_channel_mq_id(0),
-  m_async_worker(get_logger(), flow::util::ostream_op_string("srv_sess[", *this, ']'))
+  m_async_worker(get_logger(),
+                 /* (Linux) OS thread name will truncate the this-addr snippet to 15-5=10 chars here;
+                  * which should actually just fit.  We try to put the key parts up-front:
+                  * that we're part of a session::Server_session impl; and the SHM type or none (0) (perhaps
+                  * the distinction between "none" and "yes, SHM-enabled" is the useful part in most cases).
+                  * After that in non-exotic setups our srv-name is pretty much known; so not that useful.
+                  * At this stage have not yet connected, so opposing cli-name is unknown.
+                  * Hence shoving this-addr in there seems fine. */
+                 flow::util::ostream_op_string("SvS", int(S_SHM_TYPE), '-', this))
 {
   /* Accept succeeded.  We have pretty much all we need for the Channel m_master_channel.  For simplicity
    * w/r/t handling errors delay that until the async_accept_log_in() though. */
@@ -701,7 +709,8 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
   FLOW_LOG_TRACE("Server session [" << *this << "]: Created.  The accept-log-in attempt not yet requested.  "
                  "Worker thread starting, will idle until accept-log-in.  We have the freshly-accepted "
                  "master socket stream [" << m_master_sock_stm << "].");
-  m_async_worker.start();
+  m_async_worker.start(flow::async::reset_this_thread_pinning);
+  // Don't inherit any strange core-affinity!  ^-- Worker must float free.
 } // Server_session_impl::Server_session_impl()
 
 TEMPLATE_SRV_SESSION_IMPL
@@ -784,6 +793,7 @@ TEMPLATE_SRV_SESSION_IMPL
 CLASS_SRV_SESSION_IMPL::~Server_session_impl()
 {
   using flow::async::Single_thread_task_loop;
+  using flow::async::reset_thread_pinning;
   using flow::util::ostream_op_string;
 
   // We are in thread U.  By contract in doc header, they must not call us from a completion handler (thread W).
@@ -803,9 +813,11 @@ CLASS_SRV_SESSION_IMPL::~Server_session_impl()
     FLOW_LOG_INFO("Server session [" << *this << "]: Continuing shutdown.  Next we will run user async-accept-log-in "
                   "handler from some other thread.  In this user thread we will await its completion and then return.");
 
-    Single_thread_task_loop one_thread(get_logger(), ostream_op_string("srv_sess[", *this, "]-temp_deinit"));
+    Single_thread_task_loop one_thread(get_logger(), ostream_op_string("SvSDeinit", int(S_SHM_TYPE), '-', this));
     one_thread.start([&]()
     {
+      reset_thread_pinning(get_logger()); // Don't inherit any strange core-affinity.  Float free.
+
       FLOW_LOG_INFO("Server session [" << *this << "]: In transient finisher thread: Shall run pending handler.");
 
       m_log_in_on_done_func(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER);
