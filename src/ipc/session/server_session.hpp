@@ -20,6 +20,7 @@
 
 #include "ipc/session/session.hpp"
 #include "ipc/session/detail/server_session_impl.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 #include <boost/move/make_unique.hpp>
 
 namespace ipc::session
@@ -127,6 +128,16 @@ public:
 
   /// Short-hand for our base class.  To the user: note its `public` API is inherited.
   using Base = Session_mv<Server_session_impl_t>;
+
+  /// You may disregard.
+  using Async_io_obj = transport::Null_peer;
+  /// Useful for generic programming, the `sync_io`-pattern counterpart to `*this` type.
+  using Sync_io_obj = sync_io::Server_session_adapter<Server_session_mv>;
+
+  // Constants.
+
+  /// Implements Session API per contract: equals `true`.
+  static constexpr bool S_IS_SRV_ELSE_CLI = true;
 
   // Constructors/destructor.
 

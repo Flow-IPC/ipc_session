@@ -20,6 +20,7 @@
 
 #include "ipc/session/server_session.hpp"
 #include "ipc/session/detail/session_server_impl.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 
 namespace ipc::session
 {
@@ -218,6 +219,11 @@ public:
   /// Short-hand for Session_mv::Channels.
   using Channels = typename Impl::Channels;
 
+  /// You may disregard.
+  using Async_io_obj = transport::Null_peer;
+  /// Useful for generic programming, the `sync_io`-pattern counterpart to `*this` type.
+  using Sync_io_obj = sync_io::Session_server_adapter<Session_server>;
+
   // Constructors/destructor.
 
   /**
@@ -325,6 +331,17 @@ public:
    * mismatch between client and server w/r/t their master App sets.  Your software deployment story may or may not
    * be designed to allow for this as a transient condition during software upgrades and such.
    *
+   * So now the key question: what are you supposed to do about it?
+   *   - Informally our recommendation is, at least in a generally highly-available daemon situation:
+   *     Log about it; then issue a async_accept() (try again).  Reason: Assuming you've set up your
+   *     safety story properly -- the session::App info is all accurate and consistent, etc. -- this usually
+   *     means something like an unexpected disconnect in the middle of the fairly hefty ipc::Session
+   *     hand-shaking.  Less likely is the system being out of some resource such as reaching a SHM kernel object
+   *     limit or something.  Since the likeliest reason is recoverable, and could happen when generally
+   *     things are fine, it is best to assume that and continue as normal.
+   *     - But!  Ensure any such errors are carefully investigated (e.g., trigger alerts humans must look at...
+   *       or whatever).
+   *
    * @tparam Task_err
    *         Handler type matching signature of `flow::async::Task_asio_err`.
    * @param target_session
@@ -380,7 +397,7 @@ public:
    * with the freshly-open session -- to both sides.
    *
    * The server may request 0 or more init-channels.  They shall be opened and placed into
-   * `*init_channels_by_srv_req`.  The number of channels requested may depend on the 3 piece of info outlined
+   * `*init_channels_by_srv_req`.  The number of channels requested may depend on the 3 pieces of info outlined
    * above in "Server->client metadata exchange."  Thus supply `N_init_channels_by_srv_req_func
    * n_init_channels_by_srv_req_func` arg which takes all 3 of these data and returns the `size_t` channel
    * count (possibly 0).  The resulting channels shall be loaded into `*init_channels_by_srv_req`

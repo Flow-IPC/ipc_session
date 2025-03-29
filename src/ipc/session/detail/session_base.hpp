@@ -379,7 +379,7 @@ protected:
    * contracts.
    *
    * Now we explain what we're solving (Rationale); then how we solve it (Design).  The latter is much simpler,
-   * we think, to understand then the former.  Hence apologies in advance for the length of "Rationale" section.
+   * we think, to understand than the former.  Hence apologies in advance for the length of "Rationale" section.
    *
    * ### Rationale ###
    * Consider a particular Client_session_impl + Server_session_impl class/object pair, A and B.  In this case --
@@ -462,7 +462,7 @@ protected:
    * pointing into it, even borrowed things in another process.  Really it's the fact that we kill the *channel*
    * it uses to communicate with the borrower process: the arena is told there's nothing out there pointing into
    * it: locally the user has to have dropped all constructed-object handles; and the borrower process it no
-   * longer has a way of contacting it; so it assumes tgat guy's done/gone, as are all the borrowed handles in it.
+   * longer has a way of contacting it; so it assumes that guy's done/gone, as are all the borrowed handles in it.
    * That clarification doesn't change the situation though: Whether it's the SHM-jemalloc-session, or the
    * SHM-jemalloc-session-used-channel, or the SHM-jemalloc-arena going away that makes borrowed objects unusable --
    * they are unusable, is the bottom line.)
@@ -1120,7 +1120,7 @@ void CLASS_SESSION_BASE::Graceful_finisher::on_master_channel_hosed()
   {
     // Interesting.  @todo Maybe log?
   }
-} // } // Session_base::Graceful_finisher::on_master_channel_hosed()
+} // Session_base::Graceful_finisher::on_master_channel_hosed()
 
 TEMPLATE_SESSION_BASE
 void CLASS_SESSION_BASE::Graceful_finisher::on_dtor_start()

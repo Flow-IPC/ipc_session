@@ -328,6 +328,25 @@ public:
    */
   static constexpr bool S_SHM_ENABLED = unspecified;
 
+  /**
+   * Specifies whether `Session`s of this type are designated as the server side (`true`) or client side (`false`).
+   * May be useful for generic programming, particularly when already in PEER state: the two sides at that point
+   * have symmetrically equal abilities, but it can still be useful to use this value as a side ID.  That is, at
+   * that point the user can consider this as an "address" in a 2-node system: this is either node `true` or
+   * node `false`, even though as black boxes both nodes are capable of the same stuff: but you might want to decide
+   * which side will *use* those abilities one way versus another way.
+   *
+   * @note While not the case *as of this writing* (wherein to enter PEER state a `Session` must connect as a client
+   *       or be yielded from a `Session_server`), it is conceivable a `Session` impl can begin life immediately in
+   *       PEER state, e.g., based on a pre-connected bootstrap comm channel.  In that case still one side shall
+   *       be assigned a distinct "address" via this value, even if it has little or nothing to do with servers
+   *       and clients.  (By analogy: one can construct a transport::Native_socket_stream from a pre-connected
+   *       native-handle, on each side, so no client or server procedure was necessarily involved to obtain those
+   *       native-handles; it might have been `connect_pair()` instead; yet one could still assign one of those sides
+   *       as the "server," hence the other is the "client.")
+   */
+  static constexpr bool S_IS_SRV_ELSE_CLI = unspecified;
+
   // Constructors/destructor.
 
   /**

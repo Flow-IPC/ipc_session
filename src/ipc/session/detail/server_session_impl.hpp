@@ -1730,7 +1730,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                            cli_namespace_func = std::move(cli_namespace_func),
                            pre_rsp_setup_func = std::move(pre_rsp_setup_func),
                            n_init_channels_by_srv_req_func = std::move(n_init_channels_by_srv_req_func),
-                           mdt_load_func = std::move(mdt_load_func)]()
+                           mdt_load_func = std::move(mdt_load_func)]() mutable
       {
         // We are in thread W.
 

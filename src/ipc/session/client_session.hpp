@@ -20,6 +20,7 @@
 
 #include "ipc/session/session.hpp"
 #include "ipc/session/detail/client_session_impl.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 #include <boost/move/make_unique.hpp>
 
 namespace ipc::session
@@ -149,6 +150,16 @@ public:
   /// Short-hand for our base class.  To the user: note its `public` API is inherited.
   using Base = Session_mv<Client_session_impl_t>;
 
+  /// You may disregard.
+  using Async_io_obj = transport::Null_peer;
+  /// Useful for generic programming, the `sync_io`-pattern counterpart to `*this` type.
+  using Sync_io_obj = sync_io::Client_session_adapter<Client_session_mv>;
+
+  // Constants.
+
+  /// Implements Session API per contract: equals `false`.
+  static constexpr bool S_IS_SRV_ELSE_CLI = false;
+
   // Constructors/destructor.
 
   /// Inherit all ctors from Session_mv (default, move).
@@ -268,8 +279,6 @@ public:
    *
    * @param err_code
    *        See `flow::Error_code` docs for error reporting semantics.  #Error_code generated:
-   *        session::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER (destructor called, canceling all pending ops;
-   *        spiritually identical to `boost::asio::error::operation_aborted`),
    *        interprocess-mutex-related errors (probably from boost.interprocess) w/r/t reading the CNS (PID file),
    *        file-related system errors w/r/t reading the CNS (PID file) (see Session_server doc header for background),
    *        error::Code::S_CLIENT_NAMESPACE_STORE_BAD_FORMAT (bad CNS contents),
