@@ -601,19 +601,23 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
     const auto cns_path = empty_session.base().cur_ns_store_absolute_path();
     const auto cns_perms = util::PRODUCER_CONSUMER_RESOURCE_PERMISSIONS_LVL_MAP
                              [size_t(m_srv_app_ref.m_permissions_level_for_client_apps)];
+
+    const auto logger_ptr = get_logger();
+    if (logger_ptr && logger_ptr->should_log(Sev::S_INFO, get_log_component()))
     {
-      ios_all_saver saver(*(get_logger()->this_thread_ostream())); // Revert std::oct/etc. soon.
-      FLOW_LOG_INFO("Session acceptor [" << *this << "]: Created.  Writing CNS (Current Namespace Store), a/k/a PID "
-                    "file [" << cns_path << "] (perms "
-                    "[" << std::setfill('0')
-                        << std::setw(4) // Subtlety: This resets right away after the perms are output...
-                        << std::oct << cns_perms.get_permissions() << "], "
-                    "shared-mutex name [" << mutex_name << "], shared-mutex perms "
-                    "[" << std::setw(4) // ...hence gotta do this again.
-                        << mutex_perms.get_permissions() << "]); "
-                    "then listening for incoming master socket stream "
-                    "connects (through Native_socket_stream_acceptor that was just cted) to address "
-                    "based partially on the namespace (PID) written to that file.");
+      ios_all_saver saver{*(logger_ptr->this_thread_ostream())}; // Revert std::oct/etc. soon.
+      FLOW_LOG_INFO_WITHOUT_CHECKING
+        ("Session acceptor [" << *this << "]: Created.  Writing CNS (Current Namespace Store), a/k/a PID "
+         "file [" << cns_path << "] (perms "
+         "[" << std::setfill('0')
+             << std::setw(4) // Subtlety: This resets right away after the perms are output...
+             << std::oct << cns_perms.get_permissions() << "], "
+         "shared-mutex name [" << mutex_name << "], shared-mutex perms "
+         "[" << std::setw(4) // ...hence gotta do this again.
+             << mutex_perms.get_permissions() << "]); "
+         "then listening for incoming master socket stream "
+         "connects (through Native_socket_stream_acceptor that was just cted) to address "
+         "based partially on the namespace (PID) written to that file.");
     }
 
     /* See Client_session_impl where it, too, creates this sh_mutex for notes equally applicable here.

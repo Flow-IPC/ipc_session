@@ -1250,13 +1250,17 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
     const auto mutex_name = Base::cur_ns_store_mutex_absolute_name();
     const auto mutex_perms = util::shared_resource_permissions(Base::m_srv_app_ref.m_permissions_level_for_client_apps);
     const auto cns_path = Base::cur_ns_store_absolute_path();
+
+    const auto logger_ptr = get_logger();
+    if (logger_ptr && logger_ptr->should_log(Sev::S_INFO, get_log_component()))
     {
-      ios_all_saver saver(*(get_logger()->this_thread_ostream())); // Revert std::oct/etc. soon.
-      FLOW_LOG_INFO("Client session [" << *this << "]: Session-connect request: Starting session-connector thread "
-                    "and connecting.  Presumably the CNS (Current Namespace Store), a/k/a PID "
-                    "file [" << cns_path << "] (shared-mutex name [" << mutex_name << "], shared-mutex perms "
-                    "[" << std::setfill('0') << std::setw(4) << std::oct << mutex_perms.get_permissions() << "]), "
-                    "exists.");
+      ios_all_saver saver{*(logger_ptr->this_thread_ostream())}; // Revert std::oct/etc. soon.
+      FLOW_LOG_INFO_WITHOUT_CHECKING
+        ("Client session [" << *this << "]: Session-connect request: Starting session-connector thread "
+         "and connecting.  Presumably the CNS (Current Namespace Store), a/k/a PID "
+         "file [" << cns_path << "] (shared-mutex name [" << mutex_name << "], shared-mutex perms "
+         "[" << std::setfill('0') << std::setw(4) << std::oct << mutex_perms.get_permissions() << "]), "
+         "exists.");
     }
 
     Named_sh_mutex_ptr sh_mutex;
