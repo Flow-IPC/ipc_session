@@ -1142,6 +1142,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
   using util::process_id_t;
   using flow::util::ostream_op_string;
   using flow::async::Synchronicity;
+  using flow::log::Sev;
   using Named_sh_mutex = boost::interprocess::named_mutex;
   using Named_sh_mutex_ptr = boost::movelib::unique_ptr<Named_sh_mutex>;
   using Sh_lock_guard = boost::interprocess::scoped_lock<Named_sh_mutex>;

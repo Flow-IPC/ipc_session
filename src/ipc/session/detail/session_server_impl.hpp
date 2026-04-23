@@ -451,6 +451,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
   using transport::sync_io::Native_socket_stream;
   using flow::error::Runtime_error;
   using flow::async::reset_this_thread_pinning;
+  using flow::log::Sev;
   using boost::movelib::make_unique;
   using boost::system::system_category;
   using boost::io::ios_all_saver;
