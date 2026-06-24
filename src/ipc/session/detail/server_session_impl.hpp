@@ -1416,6 +1416,16 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
                    "connect_pair() generated native handles [" << local_hndl << "], [" << remote_hndl_or_null << "], "
                    "the latter to be transmitted to remote peer (client).");
     local_sock_stm_or_null = Native_socket_stream(get_logger(), nickname, std::move(local_hndl));
+
+    // Please see Native_socket_stream::remote_peer_process_credentials() doc header for explanation of this.
+    {
+      Error_code err_code;
+      local_sock_stm_or_null.remote_peer_process_credentials(m_master_channel->owned_channel()
+                                                               .remote_peer_process_credentials(&err_code));
+      assert((!err_code) && "By contract that should only fail if the socket got hosed via transmission; but "
+                            "it is a local socket we just established; so there is no way.");
+    }
+
     return true;
   }; // make_sock_stm_func =
 
