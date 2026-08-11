@@ -283,7 +283,7 @@ Session_server_adapter<Session_server>::Session_server_adapter(Ctor_args&&... ct
     std::abort();
   }
 
-  m_ev_wait_hndl.assign(Native_handle(m_ready_reader.native_handle()));
+  m_ev_wait_hndl.assign(Native_handle{m_ready_reader.native_handle()});
 }
 
 template<typename Session_server>
@@ -329,7 +329,7 @@ bool Session_server_adapter<Session_server>::replace_event_wait_handles
 
   assert(m_ev_wait_hndl.is_open());
 
-  Native_handle saved(m_ev_wait_hndl.release());
+  Native_handle saved{m_ev_wait_hndl.release()};
   m_ev_wait_hndl = create_ev_wait_hndl_func();
   m_ev_wait_hndl.assign(saved);
 

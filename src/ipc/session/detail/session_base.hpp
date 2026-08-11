@@ -21,6 +21,7 @@
 #include "ipc/session/detail/session_fwd.hpp"
 #include "ipc/session/detail/session_shared_name.hpp"
 #include "ipc/session/schema/detail/session_master_channel.capnp.h"
+#include "ipc/session/info_collector.hpp"
 #include "ipc/session/app.hpp"
 #include "ipc/session/error.hpp"
 #include "ipc/transport/struc/channel.hpp"
@@ -58,12 +59,12 @@ namespace ipc::session
  *
  * @tparam Mdt_payload
  *         See #Server_session, #Client_session (or Session concept).
- * @tparam S_MQ_TYPE_OR_NONE
+ * @tparam MQ_TYPE_OR_NONE
  *         See #Server_session, #Client_session.
- * @tparam S_TRANSMIT_NATIVE_HANDLES
+ * @tparam TRANSMIT_NATIVE_HANDLES
  *         See #Server_session, #Client_session.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 class Session_base :
   private boost::noncopyable
 {
@@ -71,15 +72,15 @@ public:
   // Constants.
 
   /// See Session_mv.
-  static constexpr bool S_MQS_ENABLED = S_MQ_TYPE_OR_NONE != schema::MqType::NONE;
+  static constexpr bool S_MQS_ENABLED = MQ_TYPE_OR_NONE != schema::MqType::NONE;
 
   /// See Session_mv.
-  static constexpr bool S_SOCKET_STREAM_ENABLED = (!S_MQS_ENABLED) || S_TRANSMIT_NATIVE_HANDLES;
+  static constexpr bool S_SOCKET_STREAM_ENABLED = (!S_MQS_ENABLED) || TRANSMIT_NATIVE_HANDLES;
 
   // Types.
 
-  static_assert(S_MQ_TYPE_OR_NONE != schema::MqType::END_SENTINEL,
-                "Do not use the value END_SENTINEL for S_MQ_TYPE_OR_NONE; it is only a sentinel.  Did you mean NONE?");
+  static_assert(MQ_TYPE_OR_NONE != schema::MqType::END_SENTINEL,
+                "Do not use the value END_SENTINEL for MQ_TYPE_OR_NONE; it is only a sentinel.  Did you mean NONE?");
 
   // Ensure the definitions immediately following are based on correct assumptions.
   static_assert(std::is_enum_v<schema::MqType>,
@@ -98,23 +99,23 @@ public:
 
   /**
    * Relevant only if #S_MQS_ENABLED, this is the Persistent_mq_handle-concept impl type specified by
-   * the user via `S_MQ_TYPE_OR_NONE`.
+   * the user via `MQ_TYPE_OR_NONE`.
    */
   using Persistent_mq_handle_from_cfg
     = std::conditional_t<!S_MQS_ENABLED,
                          transport::Null_peer,
-                         std::conditional_t<S_MQ_TYPE_OR_NONE == schema::MqType::POSIX,
+                         std::conditional_t<MQ_TYPE_OR_NONE == schema::MqType::POSIX,
                                             transport::Posix_mq_handle,
                                             transport::Bipc_mq_handle>>;
 
   /// See Session_mv (or Session concept).
   using Channel_obj = std::conditional_t<S_MQS_ENABLED,
                                          std::conditional_t
-                                           <S_TRANSMIT_NATIVE_HANDLES,
+                                           <TRANSMIT_NATIVE_HANDLES,
                                             transport::Mqs_socket_stream_channel<true, Persistent_mq_handle_from_cfg>,
                                             transport::Mqs_channel<true, Persistent_mq_handle_from_cfg>>,
                                          std::conditional_t
-                                           <S_TRANSMIT_NATIVE_HANDLES,
+                                           <TRANSMIT_NATIVE_HANDLES,
                                             transport::Socket_stream_channel<true>,
                                             transport::Socket_stream_channel_of_blobs<true>>>;
 
@@ -216,15 +217,6 @@ public:
   Shared_name session_master_socket_stream_acceptor_absolute_name() const;
 
   /**
-   * See Session_mv::heap_fixed_builder_config() (1-arg).
-   *
-   * @param logger_ptr
-   *        See above.
-   * @return See above.
-   */
-  static Structured_msg_builder_config heap_fixed_builder_config(flow::log::Logger* logger_ptr);
-
-  /**
    * See Session_mv::heap_reader_config() (1-arg).
    *
    * @param logger_ptr
@@ -259,21 +251,20 @@ protected:
    * could still claim to be non-blocking.  It's a matter of perspective really.  This value just seems to
    * cause less confusion.  We might reconsider the whole thing however.
    */
-  static constexpr util::Fine_duration S_OPEN_CHANNEL_TIMEOUT = boost::chrono::seconds(60);
+  static constexpr util::Fine_duration S_OPEN_CHANNEL_TIMEOUT = boost::chrono::seconds{60};
 
   /**
-   * The max sendable MQ message size as decided by Server_session_impl::make_channel_mqs() (and imposed on both sides,
-   * both directions), if #S_MQS_ENABLED *and* Server_session_impl::S_SHM_ENABLED is `false`, when a channel is opened
-   * (regardless of which side did the active-open or requested pre-opening at session start).
+   * The default max sendable MQ message size as decided by Server_session_impl::make_channel_mqs() (and imposed on
+   * both sides, both directions), if #S_MQS_ENABLED *and* Server_session_impl::S_SHM_ENABLED is `false`, when a
+   * channel is opened (regardless of which side did the active-open or requested pre-opening at session start).
+   * By *default* we mean this is the knob's value unless overridden via Session_server::mq_msg_size_limit().
+   *
    * If `*this` belongs to Server_session_impl, that's what this is.
    * If it belongs to Client_session_impl, then this is what the opposing process -- if they're using the same code! --
-   * will have decided.
-   *
-   * Our own heap_fixed_builder_config(), forwarded to Session_mv::heap_fixed_builder_config(), similarly uses
-   * this constant in a matching way.
+   * will have decided (again, unless overriden in the opposing process via Session_server::mq_msg_size_limit()).
    *
    * @note If Server_session_impl::S_SHM_ENABLED is `true`, then a different (much smaller) MQ message size limit
-   *       is configured.  In that case, also, heap_fixed_builder_config() is not relevant and should not be used.
+   *       default is configured.  (Again, though, it can be overridden via Session_server::mq_msg_size_limit().)
    *
    * While it looks simple, there is a number of subtleties one must understand if *ever* considering changing it.
    *
@@ -284,7 +275,7 @@ protected:
    * two cases if really desired.
    *
    * ### Why 8Ki? ###
-   * By default in Linux POSIX MQs this happens to be the actual limit for # of unread messages --
+   * By default in Linux POSIX MQs this happens to be the actual limit for message size --
    * visible in /proc/sys/fs/mqueue/msgsize_max -- so we cannot go higher typically.  However that file can be modified.
    * For now we assume a typical environment; or at least that it will not go *below* this typical default.
    * If did try a higher number here, opening of MQs by server will likely emit an error and refuse
@@ -303,20 +294,8 @@ protected:
    * - Suppose you have changed this value, and suppose the `Heap_fixed_builder`-based use case *does* matter.
    *   If ::ipc has not yet been released in production, ever, then it's fine (assuming, that is, it'll work
    *   in the first place given the aforementioned `/proc/sys/...` limit for POSIX MQs).  If it *has* been
-   *   released then there is an annoying subtlety to consider:
-   *   - If you can guarantee (via release process) that the client and server will always use the same ::ipc software,
-   *     then you're still fine.  Just change this value; done.  Otherwise though:
-   *   - There's the unfortunate caveat that is Session_base::heap_fixed_builder_config().  There you will note
-   *     it says that the *server* decides (for both sides) what this value is.  In that case that method
-   *     will be correct in the server process; but if the client process is speaking to a different version
-   *     of the server, with a different value for #S_MQS_MAX_MSG_SZ, then that is a potential bug.
-   *     - Therefore it would be advisable to not mess with it (again... once a production version is out there).
-   *       If you *do* mess with it, there are ways to ensure it all works out anyway: logic could be added
-   *       wherein the client specifies its own #S_MQS_MAX_MSG_SZ when issuing an open-channel request,
-   *       and the server must honor it in its Server_session_impl::make_channel_mqs().  So it can be done --
-   *       just know that in that case you'll have to actually add such logic; or somewhat break
-   *       heap_fixed_builder_config().  The reason I (ygoldfel) have not done this already is it seems unlikely
-   *       (for various reasons listed above) that tweaking this value is of much practical value.
+   *   released, but you can guarantee (via release process) that the client and server will always use the same ::ipc
+   *   software, then you're still fine.  Just change this value; done.
    */
   static constexpr size_t S_MQS_MAX_MSG_SZ = 8 * 1024;
 
@@ -367,6 +346,9 @@ protected:
 
   /// Observer of #Master_structured_channel_ptr.  See its doc header.
   using Master_structured_channel_observer = boost::weak_ptr<Master_structured_channel>;
+
+  /// See Session_mv (or Session concept).
+  using Info_collector = session::Info_collector<Master_structured_channel>;
 
   /// Concrete function type for the on-passive-open handler (if any), used for storage.
   using On_passive_open_channel_func = Function<void (Channel_obj&& new_channel,
@@ -448,7 +430,7 @@ protected:
    * The problem is this: Suppose B holds a borrowed handle X (to an A-allocated object).  Now A dtor runs;
    * its `.session_shm()` arena -- its constitutent SHM-pools! -- is destroyed.  That in itself shouldn't be
    * a problem; again B presumably holds a SHM-pool handle, so it won't just disappear from RAM under it.
-   * I (ygoldfel) am somewhat fuzzy on what exactly happens (not being the direct author of SHM-jemalloc), but
+   * I (ygoldfel) am somewhat fuzzy on what exactly happens (not being the direct original author of SHM-jemalloc), but
    * basically as I understand it, in destroying the arena, a bunch of jemalloc deinit steps execute; perhaps
    * heap-marker data structures are modified all over the place... it's chaos.  The bottom line is:
    * A arena gets mangled, so the B-held borrowed handle X has a high chance of pointing, now, to garbage:
@@ -461,11 +443,22 @@ protected:
    * (or more precisely as of this writing the arena-handle -- a `shared_ptr` -- does), while it knows things are
    * pointing into it, even borrowed things in another process.  Really it's the fact that we kill the *channel*
    * it uses to communicate with the borrower process: the arena is told there's nothing out there pointing into
-   * it: locally the user has to have dropped all constructed-object handles; and the borrower process it no
-   * longer has a way of contacting it; so it assumes tgat guy's done/gone, as are all the borrowed handles in it.
+   * it: locally the user has to have dropped all constructed-object handles; and the borrower process no
+   * longer has a way of contacting it; so it assumes that guy's done/gone, as are all the borrowed handles in it.
    * That clarification doesn't change the situation though: Whether it's the SHM-jemalloc-session, or the
    * SHM-jemalloc-session-used-channel, or the SHM-jemalloc-arena going away that makes borrowed objects unusable --
    * they are unusable, is the bottom line.)
+   *
+   * (Update 2/some months after the previous: Technically the situation is now somewhat different from how it was
+   * as written in the previous "update."  (Incidentally it is I who coded this change.)  The dead channel, while still
+   * a thing, is less directly relevant, as there is no more return-object command IPC-transmitted from B to A, when B
+   * no longer needs borrowed object X.  Instead A and B atomically-decrement a separately stored, in SHM,
+   * use-count value; and A opportunistically (<-at worst) checks for any use-counts that have reached zero; once
+   * detected it can free the associated X.  However this change (which is for perf) doesn't affect the core issue here:
+   * The point is still that A assumes B is "dead to A" and has ~no hope that a borrowed-from-A object X
+   * will reach use-count 0.  Or, well, it would have to wait for that to happen somehow... and that's not a thing.
+   * Hence it still assumes a guy like X is dead, and from that point it's the same
+   * reasoning as before.  Kill everything A-side; now B handle to object X is unusable.)
    *
    * All that is to say: A dtor runs; and user handle to object X in B instantly becomes unusable.
    * For example, I (ygoldfel) have observed a simple thing: A SHM-jemalloc-backed transport::struc::Msg_in received
@@ -627,6 +620,13 @@ protected:
   private:
     // Data.
 
+    /**
+     * Read or written in thread W only; `false` until on_dtor_start() true body starts in thread W, `true` from
+     * that point on.  Used as a guard to avoid emitting `SESSION_FINISHED` after awaiting `GracefulSessionEnd`
+     * (if necessary) and indeed receiving it.
+     */
+    bool m_dtor_started;
+
     /// The containing Session_base.  It shall exist until `*this` is gone.
     Session_base* const m_this_session;
 
@@ -695,6 +695,19 @@ protected:
   void set_cli_namespace(Shared_name&& cli_namespace_new);
 
   /**
+   * Restores srv_namespace() and cli_namespace() to the never-yet-set (empty) state.
+   *
+   * When to use: A `Client_session` connect attempt populates these along the way (set_srv_namespace() upon
+   * reading the server's CNS a/k/a PID file; set_cli_namespace() upon receiving the log-in response); and by
+   * public contract a failed attempt leaves the `Client_session` in NULL state, from which another attempt on
+   * the same object is permitted.  Since these values are set-at-most-once-from-empty *per attempt* -- and
+   * the next attempt may well obtain different values (e.g., the server restarted, hence a new
+   * srv-namespace/PID) -- the failed attempt's go-back-to-NULL rollback must invoke this.
+   * (Server-side: a `Server_session` never legitimately re-sets these; do not use this from server-side code.)
+   */
+  void reset_namespaces();
+
+  /**
    * Sets cli_app_ptr() (do not call if already set).
    * @param cli_app_ptr_new
    *        Value.
@@ -719,7 +732,9 @@ protected:
   void set_on_err_func(flow::async::Task_asio_err&& on_err_func_arg);
 
   /**
-   * Returns `true` if and only if set_on_err_func() has been called.
+   * Returns `true` if and only if set_on_err_func() has been called, or equivalently if error-handler was set
+   * via ctor.
+   *
    * @return See above.
    */
   bool on_err_func_set() const;
@@ -808,10 +823,10 @@ private:
 
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_SESSION_BASE \
-  template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+  template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_SESSION_BASE \
-  Session_base<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>
+  Session_base<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>
 
 // Template implementations.
 
@@ -884,6 +899,13 @@ void CLASS_SESSION_BASE::set_cli_namespace(Shared_name&& cli_namespace_new)
   assert(m_cli_namespace.empty() && "As of this writing cli_namespace should be set at most once, from empty.");
 
   m_cli_namespace = std::move(cli_namespace_new);
+}
+
+TEMPLATE_SESSION_BASE
+void CLASS_SESSION_BASE::reset_namespaces()
+{
+  m_srv_namespace.clear();
+  m_cli_namespace.clear();
 }
 
 TEMPLATE_SESSION_BASE
@@ -1016,61 +1038,11 @@ Shared_name CLASS_SESSION_BASE::session_master_socket_stream_acceptor_absolute_n
 } // Session_base::session_master_socket_stream_acceptor_absolute_name()
 
 TEMPLATE_SESSION_BASE
-typename CLASS_SESSION_BASE::Structured_msg_builder_config
-  CLASS_SESSION_BASE::heap_fixed_builder_config(flow::log::Logger* logger_ptr) // Static.
-{
-  using transport::sync_io::Native_socket_stream;
-  using transport::struc::Heap_fixed_builder;
-
-  /* This is arguably easiest when one has an actual Channel_obj; see struc::Channel::heap_fixed_builder_config()
-   * which works with that.  Then one can query the Channel_obj for its send-blob/meta-blob-max-size(s), pick the
-   * smaller, and return that.  We are static -- the whole point is to still work when one doesn't have an actual
-   * channel but might still want to construct a transport::struc::Msg_out -- in fact they might not even have a Session
-   * in our case.  Not a big deal: we use similar logic but have to use some specific knowledge about how
-   * we use our own class template params (S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES) to configure any channels
-   * we open; this tells us how big the messages the various pipes (we ourselves set up) can send-out.
-   *
-   * So follow along that other method's (rather simple) procedure and apply our "insider" knowledge.  Namely:
-   * We will *specifically* either use an MQ (of one of 2 specific types), or a socket stream, or both.
-   * - If socket stream *only*: Then Native_socket_stream advertises its blob/meta-blob max-size in a
-   *   non-concept-implementing public constant.  Use that; simple.
-   * - If MQ *only*: Not quite as simple; the message max size is configurable at run time, and we don't have
-   *   the actual MQ object (by definition).  Not to worry:
-   *   - Suppose we're really Server_session_impl.  Yay: we are the ones, in Server_session_impl::make_channel_mqs(),
-   *     who determine the MQ size, for any channel that is opened.  It's a constant... so use that constant!
-   *   - Suppose we're really Client_session_impl.  That's slightly annoying, as the opposing Server_session_impl is
-   *     technically determining the MQ size (prev bullet).  As of this writing, though, it's always been a constant
-   *     which has never changed.  So we can just use that same constant.  In the future, *technically*, the
-   *     procedure could change -- but we punt on dealing with until such time that's an actual worry.
-   *     The constant's doc header has notes about it, so it won't be overlooked.  (Spoiler alert: It's unlikely
-   *     there will be a pressing need to mess with this; SHM-based transmission obviates the need for such
-   *     perf tweaking.)
-   * - If both: Use the lower of the two (as as in struc::Channel::heap_fixed_builder_config()). */
-
-  size_t sz;
-  if constexpr(S_MQS_ENABLED && (!S_SOCKET_STREAM_ENABLED))
-  {
-    sz = S_MQS_MAX_MSG_SZ;
-  }
-  else if constexpr((!S_MQS_ENABLED) && S_SOCKET_STREAM_ENABLED)
-  {
-    sz = Native_socket_stream::S_MAX_META_BLOB_LENGTH;
-  }
-  else
-  {
-    static_assert(S_MQS_ENABLED && S_SOCKET_STREAM_ENABLED, "There must be *some* transport mechanism.");
-
-    sz = std::min(S_MQS_MAX_MSG_SZ, Native_socket_stream::S_MAX_META_BLOB_LENGTH);
-  }
-
-  return Heap_fixed_builder::Config{ logger_ptr, sz, 0, 0 };
-} // Session_base::heap_fixed_builder_config()
-
-TEMPLATE_SESSION_BASE
 CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logger_ptr, Session_base* this_session,
                                                          flow::async::Single_thread_task_loop* async_worker,
                                                          Master_structured_channel* master_channel) :
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
+  m_dtor_started(false),
   m_this_session(this_session),
   m_async_worker(async_worker),
   m_master_channel(master_channel)
@@ -1098,10 +1070,12 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
        * expect_msg() firing handler, or it would occur instead of it.  (We *do* handle the "after" case in
        * on_master_channel_hosed(), where we do indeed catch the exception.) */
 
-      if (!m_this_session->hosed())
+      if ((!m_dtor_started) && (!m_this_session->hosed()))
       {
         m_this_session->hose(error::Code::S_SESSION_FINISHED); // It'll log.
       }
+      /* else if (m_dtor_started): Session is already being destroyed of the user's volition; don't bug them.
+       * else if (hosed()): No need to hose if already hosed (the usual pre-condition for hose()). */
     }); // m_async_worker->post()
   }); // m_master_channel->expect_msg(GRACEFUL_SESSION_END)
 } // Session_base::Graceful_finisher::Graceful_finisher()
@@ -1136,11 +1110,13 @@ void CLASS_SESSION_BASE::Graceful_finisher::on_dtor_start()
     FLOW_LOG_INFO("In Session object dtor sending GracefulSessionEnd to opposing Session object along "
                   "session master channel [" << *m_master_channel << "] -- if at all possible.");
 
+    m_dtor_started = true;
+
     auto msg = m_master_channel->create_msg();
     msg.body_root()->initGracefulSessionEnd();
 
     Error_code err_code_ignored;
-    m_master_channel->send(msg, nullptr, &err_code_ignored);
+    m_master_channel->send(&msg, nullptr, &err_code_ignored);
     /* Whatever happened, it logged.  We make a best effort; it channel is hosed or send fails, then the other
      * side shall detect it via its on_master_channel_hosed() presumably and set its m_opposing_session_done, hence
      * its on_dtor_start() will proceed. */
@@ -1164,7 +1140,10 @@ TEMPLATE_SESSION_BASE
 typename CLASS_SESSION_BASE::Structured_msg_reader_config
   CLASS_SESSION_BASE::heap_reader_config(flow::log::Logger* logger_ptr) // Static.
 {
-  return transport::struc::Heap_reader::Config{ logger_ptr, 0 };
+  return transport::struc::Heap_reader::Config
+           { logger_ptr, 0,
+             // Default rcv-stats target: pure-heap global singleton.
+             &transport::struc::stat::Heap_serializer_global_stats::get().stats_mutable_default().m_rcv };
 } // Session_base::heap_reader_config()
 
 #undef CLASS_SESSION_BASE

@@ -28,22 +28,24 @@ namespace ipc::session
 
 // Find doc headers near the bodies of these compound types.
 
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 class Session_base;
 
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE = schema::ShmType::NONE,
-         size_t S_SHM_MAX_HNDL_SZ = 0,
-         bool S_GRACEFUL_FINISH_REQUIRED_V = false>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
+         schema::ShmType SHM_TYPE_OR_NONE = schema::ShmType::NONE,
+         size_t SHM_MAX_HNDL_SZ = 0,
+         bool GRACEFUL_FINISH_REQUIRED = false>
 class Server_session_impl;
 
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE = schema::ShmType::NONE,
-         bool S_GRACEFUL_FINISH_REQUIRED_V = false>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
+         schema::ShmType SHM_TYPE_OR_NONE = schema::ShmType::NONE,
+         bool GRACEFUL_FINISH_REQUIRED = false>
 class Client_session_impl;
 
 template<typename Server_session_t>
-class Server_session_dtl;
+struct Server_session_dtl;
+
+struct Info_collector_dtl;
 
 template<typename Session_server_t, typename Server_session_t>
 class Session_server_impl;
@@ -61,12 +63,12 @@ class Session_server_impl;
  *        Object to serialize.
  * @return `os`.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ, bool S_GRACEFUL_FINISH_REQUIRED_V>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
+         schema::ShmType SHM_TYPE_OR_NONE, size_t SHM_MAX_HNDL_SZ, bool GRACEFUL_FINISH_REQUIRED>
 std::ostream& operator<<(std::ostream& os,
-                         const Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES,
-                                                   Mdt_payload, S_SHM_TYPE_OR_NONE, S_SHM_MAX_HNDL_SZ,
-                                                   S_GRACEFUL_FINISH_REQUIRED_V>& val);
+                         const Server_session_impl<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES,
+                                                   Mdt_payload, SHM_TYPE_OR_NONE, SHM_MAX_HNDL_SZ,
+                                                   GRACEFUL_FINISH_REQUIRED>& val);
 
 /**
  * Prints string representation of the given `Client_session_impl` to the given `ostream`.
@@ -79,12 +81,12 @@ std::ostream& operator<<(std::ostream& os,
  *        Object to serialize.
  * @return `os`.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE, bool S_GRACEFUL_FINISH_REQUIRED_V>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
+         schema::ShmType SHM_TYPE_OR_NONE, bool GRACEFUL_FINISH_REQUIRED>
 std::ostream& operator<<(std::ostream& os,
-                         const Client_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES,
-                                                   Mdt_payload, S_SHM_TYPE_OR_NONE,
-                                                   S_GRACEFUL_FINISH_REQUIRED_V>& val);
+                         const Client_session_impl<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES,
+                                                   Mdt_payload, SHM_TYPE_OR_NONE,
+                                                   GRACEFUL_FINISH_REQUIRED>& val);
 
 /**
  * Prints string representation of the given `Session_server_impl` to the given `ostream`.

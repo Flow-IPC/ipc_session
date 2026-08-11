@@ -157,6 +157,11 @@ public:
   /**
    * Constructs (passive-opens allowed form) in NULL state.  To be useful, invoke sync_connect() next.
    *
+   * @warning `cli_app_ref` and `srv_app_ref` must remain alive throughout `*this` lifetime: their *addresses*
+   *          are stored and accessed at various points later (e.g., when `ostream<<` prints `*this`).  This is
+   *          consistent with the intended global-registry lifecycle of Client_app/Server_app/App; see the
+   *          `struct` App doc header.
+   *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
    * @param cli_app_ref
@@ -180,6 +185,11 @@ public:
 
   /**
    * Constructs (passive-opens disallowed form) in NULL state.  To be useful, invoke sync_connect() next.
+   *
+   * @warning `cli_app_ref` and `srv_app_ref` must remain alive throughout `*this` lifetime: their *addresses*
+   *          are stored and accessed at various points later (e.g., when `ostream<<` prints `*this`).  This is
+   *          consistent with the intended global-registry lifecycle of Client_app/Server_app/App; see the
+   *          `struct` App doc header.
    *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
@@ -209,8 +219,6 @@ public:
    *   - If invoked in PEER state: pass to open_channel().
    *
    * @return See above.
-   *
-   * @see Session::mdt_builder(): implemented concept.
    */
   Mdt_builder_ptr mdt_builder();
 
@@ -282,7 +290,7 @@ public:
    *        error::Code::S_INVALID_ARGUMENT (other side expected other sync_connect() overload with
    *        non-null `init_channels_by_srv_req` arg).
    */
-  bool sync_connect(Error_code* err_code = 0);
+  bool sync_connect(Error_code* err_code = nullptr);
 
   /**
    * Identical to the simpler sync_connect() overload but offers added advanced capabilities: metadata exchange;
@@ -347,11 +355,10 @@ public:
    * @return See other sync_connect() overload.
    */
   bool sync_connect(const typename Base::Mdt_builder_ptr& mdt,
-                    typename Base::Channels* init_channels_by_cli_req_pre_sized = 0,
-                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null = 0,
-                    typename Base::Channels* init_channels_by_srv_req = 0,
-                    Error_code* err_code = 0);
-
+                    typename Base::Channels* init_channels_by_cli_req_pre_sized = nullptr,
+                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null = nullptr,
+                    typename Base::Channels* init_channels_by_srv_req = nullptr,
+                    Error_code* err_code = nullptr);
 
   // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
   using Base::get_logger;

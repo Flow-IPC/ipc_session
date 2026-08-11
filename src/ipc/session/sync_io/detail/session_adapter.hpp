@@ -534,7 +534,7 @@ void Session_adapter<Session>::init_pipe(util::Pipe_reader* reader, util::Pipe_w
     std::abort();
   }
 
-  ev_wait_hndl->assign(Native_handle(reader->native_handle()));
+  ev_wait_hndl->assign(Native_handle{reader->native_handle()});
 }
 
 template<typename Session>
@@ -594,7 +594,7 @@ void Session_adapter<Session>::on_ev_channel_open()
 
   typename Channel_open_result::Ptr result;
   {
-    Lock_guard<decltype(m_target_channel_open_q_mutex)> lock(m_target_channel_open_q_mutex);
+    Lock_guard<decltype(m_target_channel_open_q_mutex)> lock{m_target_channel_open_q_mutex};
 
     FLOW_LOG_INFO("Session_adapter [" << m_async_io << "]: Async-IO core passively-opened channel event: "
                   "informed via IPC-pipe; invoking handler.  Including this one "
@@ -606,7 +606,7 @@ void Session_adapter<Session>::on_ev_channel_open()
 
     result = std::move(m_target_channel_open_q.front());
     m_target_channel_open_q.pop();
-  } // Lock_guard lock(m_target_channel_open_q_mutex);
+  } // Lock_guard lock{m_target_channel_open_q_mutex};
 
   m_on_channel_func_or_empty(std::move(result->m_channel), std::move(result->m_mdt_reader_ptr));
   FLOW_LOG_TRACE("Handler completed.  Beginning next async-wait immediately.  If more is/are pending "
@@ -638,7 +638,7 @@ bool Session_adapter<Session>::replace_event_wait_handles(const Create_ev_wait_h
   assert(m_ev_wait_hndl_err.is_open());
   assert(m_ev_wait_hndl_chan.is_open());
 
-  Native_handle saved(m_ev_wait_hndl_err.release());
+  Native_handle saved{m_ev_wait_hndl_err.release()};
   m_ev_wait_hndl_err = create_ev_wait_hndl_func();
   m_ev_wait_hndl_err.assign(saved);
 
@@ -683,7 +683,7 @@ typename Session_adapter<Session>::On_channel_func
   {
     // We are in Client_session_mv/Server_session_mv "unspecified" worker thread (called thread W in internal docs).
     {
-      Lock_guard<decltype(m_target_channel_open_q_mutex)> lock(m_target_channel_open_q_mutex);
+      Lock_guard<decltype(m_target_channel_open_q_mutex)> lock{m_target_channel_open_q_mutex};
 
       FLOW_LOG_INFO("Session_adapter [" << m_async_io << "]: Async-IO core reports passively-opened channel event: "
                     "tickling IPC-pipe to inform user.  This will make the # of pending such events "
@@ -692,7 +692,7 @@ typename Session_adapter<Session>::On_channel_func
       auto& result = *(m_target_channel_open_q.back());
       result.m_channel = std::move(new_channel);
       result.m_mdt_reader_ptr = std::move(new_channel_mdt);
-    } // Lock_guard lock(m_target_channel_open_q_mutex);
+    } // Lock_guard lock{m_target_channel_open_q_mutex};
 
     /* By Session contract, handlers are never called concurrently with each other.  Though this
      * in POSIX is thread-safe even otherwise (w/r/t another pipe_produce() and most certainly w/r/t

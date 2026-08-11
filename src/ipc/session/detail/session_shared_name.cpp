@@ -107,7 +107,7 @@ Shared_name build_conventional_shared_name_prefix(const Shared_name& resource_ty
   name /= ROOT_MAGIC;
   name /= resource_type;
   name /= srv_app_name;
-  name /= Shared_name();
+  name /= Shared_name{};
   return name;
 } // build_conventional_shared_name()
 

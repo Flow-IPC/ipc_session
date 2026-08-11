@@ -21,6 +21,7 @@
 #include "ipc/session/session_fwd.hpp"
 #include "ipc/session/schema/common.capnp.h"
 #include "ipc/transport/struc/heap_serializer.hpp"
+#include "ipc/util/process_credentials.hpp"
 #include <experimental/propagate_const>
 
 namespace ipc::session
@@ -234,6 +235,9 @@ public:
    */
   using Channel_obj = unspecified;
 
+  /// Session stats collector; see info_collector().
+  using Info_collector = unspecified;
+
   /// Short-hand for `Mdt_payload` template arg.
   using Mdt_payload_obj = Mdt_payload;
 
@@ -317,14 +321,14 @@ public:
    *
    * @see #S_SHM_ENABLED.
    */
-  static constexpr schema::ShmType S_SHM_TYPE = unspecified;
+  static constexpr schema::ShmType S_SHM_TYPE_OR_NONE = unspecified;
 
   /**
    * Specifies whether this `Session` concept implementation provides support for zero-copy via SHM plus
    * direct access to SHM arenas and lending/borrowing within them.  May be useful for
    * generic programming; perhaps in `std::conditional` or `if constexpr()` uses.
    *
-   * @see #S_SHM_TYPE
+   * @see #S_SHM_TYPE_OR_NONE
    */
   static constexpr bool S_SHM_ENABLED = unspecified;
 
@@ -438,7 +442,7 @@ public:
    *        other possible unspecified errors according to impl's discretion.  See above discussion.
    * @return See above.
    */
-  bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = 0);
+  bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = nullptr);
 
   /**
    * Identical to `open_channel(target_channel, mdt_builder(), err_code)`; in other words
@@ -457,7 +461,7 @@ public:
    * @return See other open_channel().  However it cannot return `false` due to an empty `mdt`, as `mdt`
    *         is internally generated (and left uninitialized).
    */
-  bool open_channel(Channel_obj* target_channel, Error_code* err_code = 0);
+  bool open_channel(Channel_obj* target_channel, Error_code* err_code = nullptr);
 
   /**
    * In PEER state: Returns the (non-nil) logged-in session token to be used for any `struc::Channel`s
@@ -470,10 +474,39 @@ public:
    * does so, however, then a non-nil session-token shall be *required* and, for safety, must equal
    * what this session_token() returns.
    *
-   * @return See above.  The reference returned shall always be one of 2: a certain unspecified internal
+   * @return See above.  The reference returned shall always be one of 2: to a certain unspecified internal
    *         item, or to transport::struc::NULL_SESSION_TOKEN.
    */
   const Session_token& session_token() const;
+
+  /**
+   * In PEER state: Returns the (non-null) other-connected-peer-reported info about that *other* connected peer's
+   * process; or null if in NULL state, or if `*this` session is hosed from a prior error.
+   *
+   * @return See above.  The reference returned shall always be one of 2: to a certain unspecified internal
+   *         item, or to util::NULL_PROCESS_CREDENTIALS.
+   */
+  const util::Process_credentials& remote_peer_process_credentials() const;
+
+  /**
+   * In PEER state: Returns non-null pointer to the Info_collector which assembles session-relevant stats.
+   * The returned pointer is stable through `*this` dtor.  Among other things the Info_collector is directly
+   * printable via `ostream <<`: the whole stats bundle in one output.
+   *
+   * Before PEER state returns the impl is free to return null or a non-empty #Info_collector.  (Rationale: the
+   * proper behavior depends on what the `Session` goes through before entry to PEER state.)
+   *
+   * @see e.g., Session_mv::info_collector(), part of the core API of the main Flow-IPC `Session` impl.
+   *
+   * @return Non-null in PEER state; in other state the impl is free to specify behavior.
+   */
+  Info_collector* info_collector();
+
+  /**
+   * `const` overload of info_collector().
+   * @return See non-`const` overload.
+   */
+  const Info_collector* info_collector() const;
 }; // class Session
 
 #endif // IPC_DOXYGEN_ONLY
@@ -497,7 +530,8 @@ public:
  *
  * @endinternal
  *
- * @tparam This is an implementation detail.  See Client_session_mv and Server_session_mv doc headers for
+ * @tparam Session_impl_t
+ *         This is an implementation detail.  See Client_session_mv and Server_session_mv doc headers for
  *         how to easily set this to the proper type in a given situation.
  */
 template<typename Session_impl_t>
@@ -512,37 +546,22 @@ protected:
 public:
   // Types.
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::Channel_obj: implemented concept.
-   */
+  /// Implements Session API per contract.
   using Channel_obj = typename Impl::Channel_obj;
 
   /// Container (`vector<>`) of #Channel_obj.
   using Channels = typename Impl::Channels;
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::Mdt_payload_obj: implemented concept.
-   */
+  /// Implements Session API per contract.
   using Mdt_payload_obj = typename Impl::Mdt_payload_obj;
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::Mdt_builder: implemented concept.
-   */
+  /// Implements Session API per contract.
   using Mdt_builder = typename Impl::Mdt_builder;
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::Mdt_builder_ptr: implemented concept.
-   */
+  /// Implements Session API per contract.
   using Mdt_builder_ptr = typename Impl::Mdt_builder_ptr;
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::Mdt_reader_ptr: implemented concept.
-   */
+  /// Implements Session API per contract.
   using Mdt_reader_ptr = typename Impl::Mdt_reader_ptr;
 
   /**
@@ -556,8 +575,6 @@ public:
    *       It can be used, if you still want to use non-zero-copy heap-based serialization; but it is usually
    *       better to use, directly, the shadowing definition: e.g., shm::classic::Session_mv::Structured_channel
    *       (which will show up in shm::classic::Server_session and shm::classic::Client_session).
-   *
-   * @see Session::Structured_channel: implemented concept.
    */
   template<typename Message_body>
   using Structured_channel
@@ -567,8 +584,6 @@ public:
    * Implements Session API per contract.
    *
    * @note Same note as in #Structured_channel doc header.
-   *
-   * @see Session::Structured_msg_builder_config: implemented concept.
    */
   using Structured_msg_builder_config = typename Impl::Structured_msg_builder_config;
 
@@ -576,23 +591,18 @@ public:
    * Implements Session API per contract.
    *
    * @note Same note as in #Structured_channel doc header.
-   *
-   * @see Session::Structured_msg_reader_config: implemented concept.
    */
   using Structured_msg_reader_config = typename Impl::Structured_msg_builder_config;
 
+  /// Implements Session API per contract.
+  using Info_collector = typename Impl::Info_collector;
+
   // Constants.
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::S_SHM_TYPE: implemented concept.
-   */
-  static constexpr schema::ShmType S_SHM_TYPE = Impl::S_SHM_TYPE;
+  /// Implements Session API per contract.
+  static constexpr schema::ShmType S_SHM_TYPE_OR_NONE = Impl::S_SHM_TYPE_OR_NONE;
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::S_SHM_ENABLED: implemented concept.
-   */
+  /// Implements Session API per contract.
   static constexpr bool S_SHM_ENABLED = Impl::S_SHM_ENABLED;
 
   /// Compile-time-known constant indicating whether #Channel_obj shall use a blobs pipe over message queues (MQs).
@@ -613,8 +623,6 @@ public:
    * for when one will move-from a PEER-state Session_mv.  In particular Session_server::async_accept()
    * requires these move semantics; so a default-cted Session_mv would be typically passed to it by the
    * user.
-   *
-   * @see Session::Session(): implemented concept.
    */
   Session_mv();
 
@@ -623,18 +631,13 @@ public:
    *
    * @param src
    *        See above.
-   *
-   * @see Session move ctor: implemented concept.
    */
   Session_mv(Session_mv&& src);
 
   /// Copy ction is disallowed.
   Session_mv(const Session_mv&) = delete;
 
-  /**
-   * Implements Session API per contract.
-   * @see Session::~Session(): implemented concept.
-   */
+  /// Implements Session API per contract.
   ~Session_mv();
 
   // Methods.
@@ -645,8 +648,6 @@ public:
    * @param src
    *        See above.
    * @return See above.
-   *
-   * @see Session move assignment: implemented concept.
    */
   Session_mv& operator=(Session_mv&& src);
 
@@ -657,8 +658,6 @@ public:
    * Implements Session API per contract.
    *
    * @return See above.
-   *
-   * @see Session::mdt_builder(): implemented concept.
    */
   Mdt_builder_ptr mdt_builder();
 
@@ -682,10 +681,8 @@ public:
    *        #Server_session peer was unable to acquire resources -- as of this writing MQ-related ones -- required
    *        for opening channel).
    * @return See above.
-   *
-   * @see Session::open_channel(): implemented concept.
    */
-  bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = 0);
+  bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = nullptr);
 
   /**
    * Implements Session API per contract.  See other overload for brief discussion relevant here also.
@@ -695,75 +692,49 @@ public:
    * @param err_code
    *        See above.  See also other overload.
    * @return See above.
-   *
-   * @see Session::open_channel(): implemented concept.
    */
-  bool open_channel(Channel_obj* target_channel, Error_code* err_code = 0);
+  bool open_channel(Channel_obj* target_channel, Error_code* err_code = nullptr);
 
   /**
    * Implements Session API per contract.
    *
    * @return See above.
-   *
-   * @see Session::session_token(): implemented concept.
    */
   const Session_token& session_token() const;
 
   /**
-   * Utility that obtains a heap-based (non-zero-copy) Struct_builder::Config, constructed with the most efficient
-   * yet safe values, for transport::struc::Msg_out (out-messages) compatible with #Structured_channel upgraded-from
-   * #Channel_obj channels opened via this Session_mv type.  Informally, typically, this is useful if and only if you'd
-   * like to construct a transport::struc::Msg_out, and:
-   *   - you lack a struc::Channel object from which to issue struc::Channel::create_msg() or
-   *     struc::Channel::struct_builder_config(), or if you have one, but the target out-message is
-   *     intended for multiple channels, so you don't want to stylistically tie the out-message's creation
-   *     to any particular one channel; and
-   *   - you lack a Session_mv object from which to issue non-static `this->heap_fixed_builder_config()`, or if
-   *     you have one, but the target out-message intended for multiple sessions, so you don't want
-   *     to stylistically tie the out-message's creation to any particular one Session_mv.
-   *
-   * Otherwise one would typically use `struc::Channel::create_msg()/struct_builder_config()` or a
-   * `this->heap_fixed_builder_config()` respectively.
-   *
-   * ### Usability in SHM-based Session impls ###
-   * Do note this method is available, via base class, in SHM-based Session impls
-   * (e.g., shm::classic::Server_session and shm::classic::Client_session) -- nothing forbids the use of
-   * heap-based messaging even in such a session.  However it would typically be better for performance
-   * (and in many cases is the reason for using a SHM-based Session impl in the first place) to use the
-   * non-heap-based counterparts to this method.  E.g., see
-   * shm::classic::Session_mv::session_shm_builder_config() and
-   * shm::classic::Session_mv::app_shm_builder_config(); possibly
-   * shm::classic::Session_server::app_shm_builder_config().
-   *
-   * @param logger_ptr
-   *        Logger to pass to the returned `Config`.
-   * @return See above.
-   */
-  static transport::struc::Heap_fixed_builder::Config heap_fixed_builder_config(flow::log::Logger* logger_ptr);
-
-  /**
-   * Utility that obtains a heap-based (non-zero-copy) Struct_builder::Config, constructed with the most efficient
-   * yet safe values, for transport::struc::Msg_out (out-messages) compatible with #Structured_channel upgraded-from
-   * #Channel_obj channels opened via `*this` Session_mv.  It is, simply, `heap_fixed_builder_config(L)`, where
-   * `L` is the Flow `Logger*` belonging to `*this` Session.
-   *
-   * Informally, typically, this is useful if and only if you'd like to construct a transport::struc::Msg_out, and:
-   *   - you lack a struc::Channel object from which to issue struc::Channel::create_msg() or
-   *     struc::Channel::struct_builder_config(), or if you have one, but the target out-message is
-   *     intended for multiple channels, so you don't want to stylistically tie the out-message's creation
-   *     to any particular one channel; and
-   *   - you do have a Session_mv object from which to issue non-static `this->heap_fixed_builder_config()`.
-   *
-   * ### Usability in SHM-based Session impls ###
-   * The note in the other overload's doc header applies equally.
+   * Implements Session API per contract.
    *
    * @return See above.
    */
-  transport::struc::Heap_fixed_builder::Config heap_fixed_builder_config();
+  const util::Process_credentials& remote_peer_process_credentials() const;
 
   /**
-   * Deserializing counterpart to `static` heap_fixed_builder_config().  It is mostly provided for consistency,
-   * as it simply returns `Heap_reader::Config(logger_ptr)`.
+   * Implements Session API per contract.
+   *
+   * @return See above.
+   */
+  Info_collector* info_collector();
+
+  /**
+   * Implements Session API per contract.
+   *
+   * ### Return value subtlety ###
+   * As required by the concept: PEER state => returns non-null.
+   *
+   * Otherwise, however, the concept leaves it up to the impl whether to return null or something else.  To wit
+   * as of this writing:
+   *   - #Client_session et al: NULL state => null; CONNECTING state => user has no access to `*this`.
+   *   - #Server_session et al: NULL state => null; almost-PEER state => non-null (some interesting stats have
+   *     already been collected, namely those from the internal log-in procedure).
+   *
+   * @return See above.
+   */
+  const Info_collector* info_collector() const;
+
+  /**
+   * Convenience Heap_reader::Config generator similar to struc::Channel::heap_reader_config(), but no
+   * `Channel` arg is necessary.
    *
    * @param logger_ptr
    *        Logger to pass to the returned `Config`.
@@ -772,8 +743,8 @@ public:
   static transport::struc::Heap_reader::Config heap_reader_config(flow::log::Logger* logger_ptr);
 
   /**
-   * Deserializing counterpart to non-`static` heap_fixed_builder_config().  It is mostly provided for consistency,
-   * as it simply returns `Heap_reader::Config(L)`, where `L` is the Flow `Logger*` belonging to `*this` Session.
+   * Non-`static` counterpart to other heap_reader_config() overload, equivalent to
+   * `heap_reader_config(this->get_logger())`.
    *
    * @return See above.
    */
@@ -882,9 +853,27 @@ const Session_token& CLASS_SESSION_MV::session_token() const
 }
 
 TEMPLATE_SESSION_MV
+const util::Process_credentials& CLASS_SESSION_MV::remote_peer_process_credentials() const
+{
+  return impl() ? impl()->remote_peer_process_credentials() : util::NULL_PROCESS_CREDENTIALS;
+}
+
+TEMPLATE_SESSION_MV
+typename CLASS_SESSION_MV::Info_collector* CLASS_SESSION_MV::info_collector()
+{
+  return impl() ? impl()->info_collector() : nullptr;
+}
+
+TEMPLATE_SESSION_MV
+const typename CLASS_SESSION_MV::Info_collector* CLASS_SESSION_MV::info_collector() const
+{
+  return impl() ? impl()->info_collector() : nullptr;
+}
+
+TEMPLATE_SESSION_MV
 typename CLASS_SESSION_MV::Mdt_builder_ptr CLASS_SESSION_MV::mdt_builder()
 {
-  return impl() ? impl()->mdt_builder() : Mdt_builder_ptr();
+  return impl() ? impl()->mdt_builder() : Mdt_builder_ptr{};
 }
 
 TEMPLATE_SESSION_MV
@@ -898,20 +887,6 @@ TEMPLATE_SESSION_MV
 bool CLASS_SESSION_MV::open_channel(Channel_obj* target_channel, Error_code* err_code)
 {
   return impl() ? impl()->open_channel(target_channel, err_code) : false;
-}
-
-TEMPLATE_SESSION_MV
-transport::struc::Heap_fixed_builder::Config
-  CLASS_SESSION_MV::heap_fixed_builder_config(flow::log::Logger* logger_ptr) // Static.
-{
-  return Impl::heap_fixed_builder_config(logger_ptr);
-}
-
-TEMPLATE_SESSION_MV
-transport::struc::Heap_fixed_builder::Config
-  CLASS_SESSION_MV::heap_fixed_builder_config()
-{
-  return Impl::heap_fixed_builder_config(impl() ? impl()->get_logger() : nullptr);
 }
 
 TEMPLATE_SESSION_MV

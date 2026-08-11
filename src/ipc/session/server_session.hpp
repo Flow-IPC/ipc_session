@@ -20,6 +20,7 @@
 
 #include "ipc/session/session.hpp"
 #include "ipc/session/detail/server_session_impl.hpp"
+#include "ipc/session/detail/session_fwd.hpp"
 #include <boost/move/make_unique.hpp>
 
 namespace ipc::session
@@ -102,8 +103,8 @@ namespace ipc::session
  *   -# construct it;
  *   -# call async_accept_log_in() and await its success.
  *
- * These APIs are `protected` in Server_session_mv.  The detail/ sub-class Server_session_dtl exposes them publicly
- * (but only accessible, by convention, internally; namely by Session_server).
+ * These APIs are `private` in Server_session_mv.  The detail/ `friend`-facade type Server_session_dtl exposes them
+ * publicly (but only accessible, by convention, internally; namely by Session_server).
  *
  * As of this writing the SHM-enabled Session_server variants (e.g., shm::classic::Session_server) do not require
  * any additional internally-accessed APIs.  Instead they employ 3 "customization points" using which avoids
@@ -188,6 +189,18 @@ public:
   using Base::get_log_component;
 
 protected:
+  // Types.
+
+  /// See Session_mv counterpart.
+  using Session_base_obj = typename Base::Session_base_obj;
+
+private:
+  // Friends.
+
+  /// Facade type that exposes specific `private` APIs of `*this` to other internal Flow-IPC code.
+  template<typename T>
+  friend struct Server_session_dtl;
+
   // Constructors.
 
   /**
@@ -211,7 +224,7 @@ protected:
    * For use by internal user Session_server: called no more than once, ideally immediately following ctor,
    * this attempts to get `*this` asynchronously to almost-PEER state by undergoing the log-in request/response
    * (plus, if needed, init-channel-opening) procedure (the other side of which is done by
-   * Client_session_impl::sync_connect()).  On success, `on_done_func(Error_code())` is invoked from unspecified
+   * Client_session_impl::sync_connect()).  On success, `on_done_func(Error_code{})` is invoked from unspecified
    * thread that is not the user's calling thread.  On failure, it does similarly but with a non-success code.
    * If the op does not complete before dtor, then
    * `on_done_func(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER)` is invoked at that point.

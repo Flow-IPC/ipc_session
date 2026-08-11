@@ -18,9 +18,13 @@
 /// @file
 #pragma once
 
+#include "ipc/session/detail/info_collector_dtl.hpp"
 #include "ipc/session/detail/session_base.hpp"
 #include "ipc/session/error.hpp"
 #include "ipc/transport/protocol_negotiator.hpp"
+#include "ipc/transport/native_socket_stream_cfg.hpp"
+#include "ipc/util/process_credentials.hpp"
+#include <optional>
 
 namespace ipc::session
 {
@@ -31,7 +35,7 @@ namespace ipc::session
  * Internal, non-movable pImpl-lite implementation of Server_session_mv class template.
  * In and of itself it would have been directly and publicly usable; however Server_session_mv adds move semantics.
  *
- * @see All discussion of the public (and `protected`, to be exposed `public`ly by Server_session_dtl) API is in
+ * @see All discussion of the public (and `private`, to be exposed `public`ly by Server_session_dtl) API is in
  *      Server_session_mv doc header; that class template forwards to this
  *      one.  All discussion of pImpl-lite-related notions is also there.  See that doc header first please.  Then come
  *      back here.
@@ -54,7 +58,7 @@ namespace ipc::session
  * The state machine of Server_session_impl is simpler than Client_session_impl.  The asymmetry is, firstly, due to the
  * client-server setup: Session_server is the one, on the server end, that awaits the initial
  * transport::Native_socket_stream connection.  Once a PEER-state `Native_socket_stream` is ready, only then
- * does Session_server create a Server_session_dtl (which is a `public` facade to Server_session_mv, which
+ * does Session_server create a Server_session_mv (which
  * is a movable `unique_ptr` wrapper around this Server_session_impl).  So `*this`, unlike a Client_session_impl,
  * does not need to connect a socket.  Next, Server_session_impl just needs to complete one async step, which is
  * in practice immediately (and, by contract, only once) invoked: async_accept_log_in().  At this stage user does
@@ -165,32 +169,32 @@ namespace ipc::session
  * non-blocking/synchronous facade with async-with-timeout internals.  See Client_session_impl doc header for
  * brief discussion.
  *
- * @tparam S_MQ_TYPE_OR_NONE
+ * @tparam MQ_TYPE_OR_NONE
  *         See #Server_session counterpart.
- * @tparam S_TRANSMIT_NATIVE_HANDLES
+ * @tparam TRANSMIT_NATIVE_HANDLES
  *         See #Server_session counterpart.
  * @tparam Mdt_payload
  *         See #Server_session counterpart.
- * @tparam S_SHM_TYPE_OR_NONE
+ * @tparam SHM_TYPE_OR_NONE
  *         See common.capnp `ShmType` capnp-`enum` definition.
- * @tparam S_SHM_MAX_HNDL_SZ
- *         Ignored if `S_SHM_TYPE_OR_NONE` indicates we are not SHM-enabled, this otherwise indicates the max
+ * @tparam SHM_MAX_HNDL_SZ
+ *         Ignored if `SHM_TYPE_OR_NONE` indicates we are not SHM-enabled, this otherwise indicates the max
  *         size of a SHM handle's blob serialization.  If ignored it must be set to 0 (convention).
- * @tparam S_GRACEFUL_FINISH_REQUIRED_V
+ * @tparam GRACEFUL_FINISH_REQUIRED
  *         `true` if and only if Session_base::Graceful_finisher must be used.
  *         See its doc header for explanation when that would be the case.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
-         schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ, bool S_GRACEFUL_FINISH_REQUIRED_V>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload,
+         schema::ShmType SHM_TYPE_OR_NONE, size_t SHM_MAX_HNDL_SZ, bool GRACEFUL_FINISH_REQUIRED>
 class Server_session_impl :
-  public Session_base<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
+  public Session_base<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
   public flow::log::Log_context
 {
 public:
   // Types.
 
   /// Short-hand for base type.
-  using Base = Session_base<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>;
+  using Base = Session_base<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>;
 
   /// Short-hand for Session_base super-class.
   using Session_base_obj = Base;
@@ -219,19 +223,22 @@ public:
   /// See Session_mv counterpart.
   using Structured_msg_reader_config = typename Base::Structured_msg_reader_config;
 
+  /// See Session_mv counterpart.
+  using Info_collector = typename Base::Info_collector;
+
   // Constants.
+
+  /// See Session_mv counterpart.
+  static constexpr schema::ShmType S_SHM_TYPE_OR_NONE = SHM_TYPE_OR_NONE;
 
   static_assert(S_SHM_TYPE_OR_NONE != schema::ShmType::END_SENTINEL,
                 "Do not set it to sentinel enum value which is only for counting # of possible values and such.");
 
   /// See Session_mv counterpart.
-  static constexpr schema::ShmType S_SHM_TYPE = S_SHM_TYPE_OR_NONE;
+  static constexpr bool S_SHM_ENABLED = S_SHM_TYPE_OR_NONE != schema::ShmType::NONE;
 
-  /// See Session_mv counterpart.
-  static constexpr bool S_SHM_ENABLED = S_SHM_TYPE != schema::ShmType::NONE;
-
-  static_assert(S_SHM_ENABLED || (S_SHM_MAX_HNDL_SZ == 0),
-                "S_SHM_MAX_HNDL_SZ is ignored if SHM disabled; and must be set to 0 by required convention.");
+  static_assert(S_SHM_ENABLED || (SHM_MAX_HNDL_SZ == 0),
+                "SHM_MAX_HNDL_SZ is ignored if SHM disabled; and must be set to 0 by required convention.");
 
   /// See Server_session_mv counterpart.
   static constexpr bool S_MQS_ENABLED = Base::S_MQS_ENABLED;
@@ -239,8 +246,8 @@ public:
   /// See Server_session_mv counterpart.
   static constexpr bool S_SOCKET_STREAM_ENABLED = Base::S_SOCKET_STREAM_ENABLED;
 
-  /// Short-hand for template parameter knob `S_GRACEFUL_FINISH_REQUIRED_V`: see class template doc header.
-  static constexpr bool S_GRACEFUL_FINISH_REQUIRED = S_GRACEFUL_FINISH_REQUIRED_V;
+  /// Short-hand for template parameter knob `GRACEFUL_FINISH_REQUIRED`: see class template doc header.
+  static constexpr bool S_GRACEFUL_FINISH_REQUIRED = GRACEFUL_FINISH_REQUIRED;
 
   // Constructors/destructor.
 
@@ -344,7 +351,7 @@ public:
    *        See Server_session_mv counterpart.
    * @return See Server_session_mv counterpart.
    */
-  bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = 0);
+  bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = nullptr);
 
   /**
    * See Server_session_mv counterpart.
@@ -355,13 +362,31 @@ public:
    *        See Server_session_mv counterpart.
    * @return See Server_session_mv counterpart.
    */
-  bool open_channel(Channel_obj* target_channel, Error_code* err_code = 0);
+  bool open_channel(Channel_obj* target_channel, Error_code* err_code = nullptr);
 
   /**
    * See Server_session_mv counterpart.
    * @return See Server_session_mv counterpart.
    */
   const Session_token& session_token() const;
+
+  /**
+   * See Server_session_mv counterpart.
+   * @return See Server_session_mv counterpart.
+   */
+  const util::Process_credentials& remote_peer_process_credentials() const;
+
+  /**
+   * See Session_mv counterpart.
+   * @return See Session_mv counterpart.
+   */
+  Info_collector* info_collector();
+
+  /**
+   * See Session_mv counterpart.
+   * @return See Session_mv counterpart.
+   */
+  const Info_collector* info_collector() const;
 
   /**
    * See Server_session_mv counterpart.
@@ -495,6 +520,28 @@ private:
   bool handlers_are_set() const;
 
   /**
+   * Utility that implements thread-U accessors like session_token().
+   *
+   * @tparam Value
+   *         Type of value being accessed.
+   * @tparam Member_func
+   *         Meant to be auto-determined by the compiler, this is the member function pointer type
+   *         of arg `master_channel_accessor_func`.
+   * @param sentinel
+   *        Reference to return, if accessor called in a state necessitating a null/nil/sentinel return.
+   * @param master_channel_accessor_func
+   *        Pointer to *member function* (method) of class type #Master_structured_channel.
+   *        This shall be called with `this = m_master_channel`, unless we shall determine we should merely return
+   *        `sentinel` due to improper state.
+   * @param description
+   *        Accessor description (e.g., "session-token") for logging only.
+   * @return Value for calling accessor to return.
+   */
+  template<typename Value, typename Member_func>
+  const Value& accessor_impl(const Value& sentinel, Member_func master_channel_accessor_func,
+                             util::String_view description) const;
+
+  /**
    * In thread W, handler for #m_master_channel indicating incoming-direction channel-hosing error.
    * It is possible that #m_master_channel has been `.reset()` in the meantime, by seeing log-in failure
    * in on_master_channel_open_channel_req(), and no longer exists.
@@ -571,6 +618,9 @@ private:
                         Error_code* err_code);
 
   // Data.
+
+  /// See Client_session_impl::m_dtor_started doc header, including the rationale; identical role here.
+  bool m_dtor_started;
 
   /**
    * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
@@ -652,6 +702,31 @@ private:
    */
   Master_structured_channel_ptr m_master_channel;
 
+  /**
+   * Empty until almost-PEER state is reached (async_accept_log_in() succeeds); then engaged and stable through dtor.
+   * info_collector() returns `&*m_info_collector` if engaged, else `nullptr` (consistent with the Session concept:
+   * pre-PEER the impl is permitted to return null or non-null; for `Server_session` we return null in NULL state
+   * and non-null from almost-PEER onward).
+   *
+   * It would be harmless, but a bit less clean and (temporarily) more wasteful of resources, to just set this
+   * up permanently once we `m_master_channel->start()`.  If something goes wrong after that, the user won't
+   * get access to `*this` ever anyway.  Nevertheless we've decided to only de-nullify this once session-setup
+   * success is assured.
+   *
+   * ### Thread safety ###
+   * From the user's point of view (meaning within the NULL-state `*this` constructed by them and passed as
+   * the target `Session` to Session_server::async_accept() et al), this becomes de-nullified -- if ever --
+   * between entry to async_accept() and its invoking the on-done handler (at which point it is in
+   * almost-PEER state).  Otherwise it is stable.  They are not allowed to touch their `Server_session`/equivalent
+   * during that exact time period, so there you go.  (In reality it is our wrapping `unique_ptr` that changes:
+   * `*this` replaces their empty/dummy Server_session.)
+   *
+   * Internally it changes in thread W (#m_async_worker) during the log-in process (as explained above), but that
+   * occurs during the above time period also -- plus before the aforementioned `unique_ptr` replacement, when
+   * they have no access to `*this`.
+   */
+  std::optional<Info_collector> m_info_collector;
+
   /// See sub_class_set_deinit_func().  `.empty()` unless that was called at least once.
   Function<void ()> m_deinit_func_or_empty;
 
@@ -662,6 +737,28 @@ private:
    * @see Session_base::Graceful_finisher doc header for all the background ever.
    */
   std::optional<typename Base::Graceful_finisher> m_graceful_finisher;
+
+  /**
+   * Permanently assigned by async_accept_log_in() (which is called once at most), then called whenever
+   * we must open an MQ-enabled `Channel` (whether during log-in as an init-channel or later due to
+   * our or opposing `open_channel()`), this returns Session_server::mq_msg_size_limit() for the
+   * `Session_server` that spawned `*this` (issued async_accept_log_in()).
+   *
+   * ### Rationale: Why store is as a functor? ###
+   * Well, firstly, it works; and there is no perf aspect to it.  So then is there a better alternative?  Answer:
+   * Basically it's either this, or async_accept_log_in() instead must store the `srv` arg somehow (as a member)
+   * instead (and then we'd just call `srv->mq_msg_size_limit()` when needed).  Why is that worse?  Honestly I
+   * (ygoldfel) don't remember right now, and as I write this it doesn't seem important to research it for this
+   * comment.  At least we can say, `srv` is of a function-template-parameterized type; so we'd need to get at the
+   * Session_server_impl core in `*srv`, probably.  Is it even worth the pain of thinking about it, given that
+   * we can quite simply grab it in the form of this functor, and let the `Function<>` machinery deal with the
+   * generic-programming difficulties?  The answer is no, I think.  (Plus, even the thinkie-pain aside, is it
+   * stylistically that great to store a `Session_server_impl*` and worry about what parts of it to access?  More
+   * thinkie-pain results.  Let's not.)
+   *
+   * We need this one value, so save the thing that can get it anytime.  Simple(r)!
+   */
+  Function<size_t()> m_mq_msg_size_limit_func;
 }; // class Server_session_impl
 
 // Free functions: in *_fwd.hpp.
@@ -670,18 +767,20 @@ private:
 
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_SRV_SESSION_IMPL \
-  template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload, \
-           schema::ShmType S_SHM_TYPE_OR_NONE, size_t S_SHM_MAX_HNDL_SZ, bool S_GRACEFUL_FINISH_REQUIRED_V>
+  template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload, \
+           schema::ShmType SHM_TYPE_OR_NONE, size_t SHM_MAX_HNDL_SZ, bool GRACEFUL_FINISH_REQUIRED>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_SRV_SESSION_IMPL \
-  Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload, \
-                      S_SHM_TYPE_OR_NONE, S_SHM_MAX_HNDL_SZ, S_GRACEFUL_FINISH_REQUIRED_V>
+  Server_session_impl<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload, \
+                      SHM_TYPE_OR_NONE, SHM_MAX_HNDL_SZ, GRACEFUL_FINISH_REQUIRED>
 
 TEMPLATE_SRV_SESSION_IMPL
 CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
                                             transport::sync_io::Native_socket_stream&& master_channel_sock_stm) :
   Base(srv_app_ref),
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
+
+  m_dtor_started(false),
 
   /* Initial protocol = 1!
    * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
@@ -701,7 +800,7 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
                   * After that in non-exotic setups our srv-name is pretty much known; so not that useful.
                   * At this stage have not yet connected, so opposing cli-name is unknown.
                   * Hence shoving this-addr in there seems fine. */
-                 flow::util::ostream_op_string("SvS", int(S_SHM_TYPE), '-', this))
+                 flow::util::ostream_op_string("SvS", int(SHM_TYPE_OR_NONE), '-', this))
 {
   /* Accept succeeded.  We have pretty much all we need for the Channel m_master_channel.  For simplicity
    * w/r/t handling errors delay that until the async_accept_log_in() though. */
@@ -731,6 +830,14 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
                 "This is generally recommended at EOL of any struc::Channel, on error or otherwise.  "
                 "This is technically blocking but unlikely to take long.  Also a Graceful_finisher phase may "
                 "precede the above steps (it will log if so).");
+
+  /* First things first: no later than now -- in thread W terms -- stop emitting session-hosing errors to
+   * the user's on-error handler.  See m_dtor_started doc header (rationale et al).  Posting order matters:
+   * this precedes any Graceful_finisher tasks below, and thread W executes in-order.
+   *
+   * Reiterating here though: Nothing can and this won't prevent handler firing during dtor altogether; it
+   * might be happening already.  Said doc header explains why we still prevent it from this point on. */
+  m_async_worker.post([this]() { m_dtor_started = true; });
 
   if constexpr(S_GRACEFUL_FINISH_REQUIRED)
   {
@@ -813,7 +920,8 @@ CLASS_SRV_SESSION_IMPL::~Server_session_impl()
     FLOW_LOG_INFO("Server session [" << *this << "]: Continuing shutdown.  Next we will run user async-accept-log-in "
                   "handler from some other thread.  In this user thread we will await its completion and then return.");
 
-    Single_thread_task_loop one_thread(get_logger(), ostream_op_string("SvSDeinit", int(S_SHM_TYPE), '-', this));
+    Single_thread_task_loop one_thread{get_logger(),
+                                       ostream_op_string("SvSDeinit", int(S_SHM_TYPE_OR_NONE), '-', this)};
     one_thread.start([&]()
     {
       reset_thread_pinning(get_logger()); // Don't inherit any strange core-affinity.  Float free.
@@ -858,8 +966,8 @@ bool CLASS_SRV_SESSION_IMPL::init_handlers(Task_err&& on_err_func_arg,
   m_async_worker.post([&]()
   {
     // We are in thread W.
-    result = init_handlers_impl(Task_asio_err(std::move(on_err_func_arg)),
-                                On_passive_open_channel_func(std::move(on_passive_open_channel_func_arg)));
+    result = init_handlers_impl(Task_asio_err{std::move(on_err_func_arg)},
+                                On_passive_open_channel_func{std::move(on_passive_open_channel_func_arg)});
   }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION);
   return result;
 }
@@ -877,8 +985,7 @@ bool CLASS_SRV_SESSION_IMPL::init_handlers(Task_err&& on_err_func_arg)
   m_async_worker.post([&]()
   {
     // We are in thread W.
-    result = init_handlers_impl(Task_asio_err(std::move(on_err_func_arg)),
-                                On_passive_open_channel_func());
+    result = init_handlers_impl(Task_asio_err{std::move(on_err_func_arg)}, {});
   }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION);
   return result;
 }
@@ -924,10 +1031,12 @@ bool CLASS_SRV_SESSION_IMPL::init_handlers_impl
                       "It is hard to imagine what it could be, but it is not known to be a bug or problem.  "
                       "It is interesting enough for INFO log level though.  Recommend investigation.");
       }
-      else
+      else if (!m_dtor_started)
       {
         Base::hose(m_pre_init_err_code);
       }
+      /* else if (m_dtor_started): The dtor has begun in the async-gap since init_handlers(); the user
+       * no longer benefits from any notification.  See m_dtor_started doc header. */
     });
     return true;
   }
@@ -960,38 +1069,71 @@ bool CLASS_SRV_SESSION_IMPL::handlers_are_set() const
 }
 
 TEMPLATE_SRV_SESSION_IMPL
-const Session_token& CLASS_SRV_SESSION_IMPL::session_token() const
+template<typename Value, typename Member_func>
+const Value& CLASS_SRV_SESSION_IMPL::accessor_impl(const Value& sentinel,
+                                                   Member_func master_channel_accessor_func,
+                                                   util::String_view description) const
 {
   using flow::async::Synchronicity;
 
   // We are in thread U.
 
-  const Session_token* result;
+  const Value* result;
   m_async_worker.post([&]()
   {
     // We are in thread W.
+
     if (!handlers_are_set())
     {
-      FLOW_LOG_WARNING("Server session [" << *this << "]: Session-token accessor: Invoked before PEER state. "
-                       "Returning null.");
-      result = &transport::struc::NULL_SESSION_TOKEN;
+      FLOW_LOG_WARNING("Server session [" << *this << "]: Accessor of [" << description << "]: "
+                       "Invoked before PEER state.  Returning sentinel.");
+      result = &sentinel;
     }
-    // else
-
-    if (Base::hosed())
+    else if (Base::hosed())
     {
-      FLOW_LOG_WARNING("Server session [" << *this << "]: Session-token accessor: Core executing after session "
-                       "hosed.  Ignoring.");
-      result = &(transport::struc::NULL_SESSION_TOKEN);
-      return;
+      FLOW_LOG_WARNING("Server session [" << *this << "]: Accessor of [" << description << "]: "
+                       "Core executing after session hosed.  Returning sentinel.");
+      result = &sentinel;
     }
-    // else
-
-    assert(m_master_channel);
-    result = &(m_master_channel->session_token());
+    else
+    {
+      assert(m_master_channel);
+      result = &((m_master_channel.get()->*master_channel_accessor_func)());
+    }
   }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION);
+
   return *result;
-} // Server_session_impl::session_token()
+} // Server_session_impl::accessor_impl()
+
+TEMPLATE_SRV_SESSION_IMPL
+const Session_token& CLASS_SRV_SESSION_IMPL::session_token() const
+{
+  return accessor_impl<Session_token>(transport::struc::NULL_SESSION_TOKEN,
+                                      &Master_structured_channel::session_token,
+                                      "session-token");
+}
+
+TEMPLATE_SRV_SESSION_IMPL
+const util::Process_credentials& CLASS_SRV_SESSION_IMPL::remote_peer_process_credentials() const
+{
+  return accessor_impl<util::Process_credentials>(util::NULL_PROCESS_CREDENTIALS,
+                                                  &Master_structured_channel::remote_peer_process_credentials,
+                                                  "peer-process-creds");
+}
+
+TEMPLATE_SRV_SESSION_IMPL
+typename CLASS_SRV_SESSION_IMPL::Info_collector* CLASS_SRV_SESSION_IMPL::info_collector()
+{
+  /* We are in thread U.  This is thread-safe w/r/t changing from null to non-null, which should be clear on
+   * reading the m_info_collector doc header. */
+  return m_info_collector ? &*m_info_collector : nullptr;
+}
+
+TEMPLATE_SRV_SESSION_IMPL
+const typename CLASS_SRV_SESSION_IMPL::Info_collector* CLASS_SRV_SESSION_IMPL::info_collector() const
+{
+  return m_info_collector ? &*m_info_collector : nullptr;
+}
 
 TEMPLATE_SRV_SESSION_IMPL
 typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_builder()
@@ -1039,8 +1181,8 @@ typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_bui
 
   if (!open_channel_req_msg_inited)
   {
-    // As advertised: Previous error (reported via on-error handler) => return null.
-    return Mdt_builder_ptr();
+    // As advertised: Not PEER state => return null.
+    return {};
   }
   // else
 
@@ -1051,6 +1193,13 @@ typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_bui
     open_channel_root.setServerToClientMqAbsNameOrEmpty(mq_name_s2c_or_none.str());
   }
   /* else if (!resources_acquired_ok):
+   * Possibility 1: When about to grab resources, detected Base::hosed(), so did not grab them: no point.
+   * In any case we are not to return null (that is only if called pre-PEER, user error); but open_channel()
+   * will not even check *<return value>'s contents; precondition hosed() is irreversible and leads it to
+   * just return false and no-op otherwise.  (We'll save the discussion of whether our behavior here is a
+   * reasonable contract until a few lines down, where possibility 2 is discussed.  More or less same logic here.)
+   *
+   * Possibility 2: Everything is otherwise fine, as far as we know, but tried to grab resource and:
    * Resource unavailable.  Now, we know this already, even though we haven't even sent any request to the
    * client -- because we *are* the server and thus immediately can and must acquire the channel resources.
    * Our contract is to report such a problem via the later open_channel() though.  So we save this fact
@@ -1059,9 +1208,9 @@ typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_bui
    * By saving a default-cted Channel_obj in this event, we indicate this fact.
    *
    * Rationale: Well, we promised this behavior.  But why?  We could report it now.  Answer: It would be a clumsy
-   * API contract.  Either we must return `false`, in which case they cannot easily distinguish between
-   * "prior incoming-direction error => false, just count on the on-error handler" and
-   * "resource unavailable error => false, your decision whether to blow everything up or what.";
+   * API contract.  Either we must return null, in which case they cannot easily distinguish between
+   * "called pre-PEER => null, nothing more to it" and
+   * "resource unavailable error => null, your decision whether to blow everything up or what.";
    * or we'd need to add an Error_code* out-arg, which means complicating the Session concept API, which means
    * changing Server_session too.  Anyway, it is weird, from user's PoV, to even deal with the idea that
    * in a Client_session the metadata-builder-returning method somehow can already fail -- they have no reason
@@ -1072,14 +1221,14 @@ typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_bui
    * error -- not fatal to the Session -- is a possibility, unlike other `Error_code`s which are fatal.
    * However (1) that's open_channel()'s problem; and (2) it is manageable (and is mandated by Session concept). */
 
-  Open_channel_req_ptr open_channel_req_ptr(new Open_channel_req
+  Open_channel_req_ptr open_channel_req_ptr{new Open_channel_req
                                                   { open_channel_root.initMetadata(),
                                                     std::move(open_channel_req_msg),
                                                     // If this is empty: indicates resource-unavail eventuality.
                                                     resources_acquired_ok
                                                       ? std::move(opened_channel)
-                                                      : Channel_obj() });
-  return Mdt_builder_ptr(std::move(open_channel_req_ptr), &open_channel_req_ptr->m_mdt_builder);
+                                                      : Channel_obj{} }};
+  return Mdt_builder_ptr{std::move(open_channel_req_ptr), &open_channel_req_ptr->m_mdt_builder};
 } // Server_session_impl::mdt_builder()
 
 TEMPLATE_SRV_SESSION_IMPL
@@ -1099,33 +1248,11 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
   if (!mdt)
   {
     FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open active request: "
-                     "null metadata-builder passed-in; either user error passing in null; or more likely "
-                     "that routine failed and returned null, meaning an incoming-direction error was or is being "
-                     "emitted to the on-error handler.  Emitting code-less failure in this synchronous path.");
+                     "null metadata-builder passed-in; presumably user error.  "
+                     "Emitting code-less failure in this synchronous path.");
     return false;
   }
   // else
-
-  // See mdt_builder(): It may be indicating to us the resource-unavailable error.  Check for this.
-
-  auto& open_channel_req = *(reinterpret_cast<Open_channel_req*>(mdt.get()));
-  if (!open_channel_req.m_opened_channel.initialized())
-  {
-    // @todo Maybe save the original Error_code responsible for this instead of emitting this catch-all thingie?
-    *err_code = error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE;
-    FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open active request: "
-                     "metadata-builder indicates resources-unavailable error (not fatal to session).  Emitting error "
-                     "[" << *err_code << "] [" << err_code->message() << "] without attempting any request to client.");
-    return true;
-  }
-  // else
-
-  // @todo The rest is way too similar to Client_session's.  Code reuse somehow?  Via Session_base perhaps?
-
-  FLOW_LOG_INFO("Server session [" << *this << "]: Channel open active request: The blocking, but presumed "
-                "sufficiently quick to be considered non-blocking, request-response exchange initiating; timeout set "
-                "to a generous [" << round<milliseconds>(Base::S_OPEN_CHANNEL_TIMEOUT) << "].  The channel is already "
-                "opened on our side: [" << open_channel_req.m_opened_channel << "].");
 
   /* As usual do all the work in thread W, where we can access m_master_channel and m_state among other things.
    * We do need to return the results of the operation here in thread U though. */
@@ -1146,13 +1273,31 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
       sync_error_but_do_not_emit = true;
       return;
     }
-    // else if (!Base::hosed()): We can attempt sync_request() (which could hose us itself).
+    /* else if (!Base::hosed()): We can attempt sync_request() (which could hose us itself)... but first....
+     *
+     * See mdt_builder(): It may be indicating to us the resource-unavailable error.  Check for this. */
 
     auto& open_channel_req = *(reinterpret_cast<Open_channel_req*>(mdt.get()));
+    if (!open_channel_req.m_opened_channel.initialized())
+    {
+      // @todo Maybe save the original Error_code responsible for this instead of emitting this catch-all thingie?
+      *err_code = error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE;
+      FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open active request: "
+                       "metadata-builder indicates resources-unavailable error (not fatal to session).  Emitting "
+                       "(non-session-hosing) error [" << *err_code << "] [" << err_code->message() << "] "
+                       "without attempting any request to client.");
+      return;
+    }
+    // else
 
     /* Now simply issue the open-channel request prepared already via `mdt` and synchronously
      * await response, or error, or timeout.  struc::Channel::sync_request() is tailor-made for this. */
-    const auto open_channel_rsp = m_master_channel->sync_request(open_channel_req.m_req_msg, nullptr,
+    FLOW_LOG_INFO("Server session [" << *this << "]: Channel open active request: The blocking, but presumed "
+                  "sufficiently quick to be considered non-blocking, request-response exchange initiating; timeout set "
+                  "to a generous [" << round<milliseconds>(Base::S_OPEN_CHANNEL_TIMEOUT) << "].  The channel is "
+                  "already opened on our side: [" << open_channel_req.m_opened_channel << "].");
+
+    const auto open_channel_rsp = m_master_channel->sync_request(&open_channel_req.m_req_msg, nullptr,
                                                                  Base::S_OPEN_CHANNEL_TIMEOUT, err_code);
 
     if ((!open_channel_rsp) && (!*err_code))
@@ -1175,7 +1320,7 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
                          "Emitting (non-session-hosing) error.");
 
         *err_code = error::Code::S_SESSION_OPEN_CHANNEL_ACTIVE_TIMEOUT;
-        // Non-session hosing error will be synchronously emitted; *this will continue (as promised).
+        // Non-session-hosing error will be synchronously emitted; *this will continue (as promised).
         return;
       }
       // else if (*err_code truthy but not timeout): Session got hosed.
@@ -1216,8 +1361,8 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
     if (*err_code)
     {
       FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open active request: Response received but "
-                       "indicates remote peer (client) refused; emitting "
-                       "[" << *err_code << "] [" << err_code->message() << "] with explanation from remote "
+                       "indicates opposing peer (client) refused; emitting "
+                       "[" << *err_code << "] [" << err_code->message() << "] with explanation from opposing "
                        "peer.  This will not hose session on our end.");
       // Note: all of the above are advertised as non-session-hosing.
       return;
@@ -1319,15 +1464,15 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_open_channel_req
       typename Mdt_reader_ptr::element_type m_mdt_reader;
       typename Master_structured_channel::Msg_in_ptr m_req;
     };
-    shared_ptr<Req_and_mdt_reader> req_and_mdt(new Req_and_mdt_reader
+    shared_ptr<Req_and_mdt_reader> req_and_mdt{new Req_and_mdt_reader
                                                      { open_channel_req->body_root()
                                                          .getOpenChannelToServerReq().getMetadata(),
-                                                       std::move(open_channel_req) });
-    mdt = Mdt_reader_ptr(std::move(req_and_mdt), &req_and_mdt->m_mdt_reader);
+                                                       std::move(open_channel_req) }};
+    mdt = Mdt_reader_ptr{std::move(req_and_mdt), &req_and_mdt->m_mdt_reader};
   } // else if (open_channel_result == ACCEPTED)
 
   Error_code err_code;
-  if (!m_master_channel->send(open_channel_rsp, open_channel_req_saved, &err_code))
+  if (!m_master_channel->send(&open_channel_rsp, open_channel_req_saved, &err_code))
   {
     return;
   }
@@ -1335,8 +1480,12 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_open_channel_req
   if (err_code)
   {
     FLOW_LOG_WARNING("Server session [" << *this << "]: Passive open-channel: send() of OpenChannelToServerRsp "
-                     "failed (details above presumably); this hoses the session.  Emitting to user handler.");
-    Base::hose(err_code);
+                     "failed (details above presumably); this hoses the session.  Emitting to user handler "
+                     "(unless dtor has begun).");
+    if (!m_dtor_started) // (See its doc header for rationale.)
+    {
+      Base::hose(err_code);
+    }
     return;
   } // if (err_code on send())
   // else
@@ -1352,7 +1501,7 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_open_channel_req
 
   // Great!
   FLOW_LOG_INFO("Server session [" << *this << "]: Passive open-channel: Successful on this side!  Response sent; "
-                "remote peer (client) shall establish its peer object once received.  We emit local peer Channel "
+                "opposing peer (client) shall establish its peer object once received.  We emit local peer Channel "
                 "object [" << opened_channel << "], plus the channel-open metadata, "
                 "to user via passive-channel-open handler.");
   on_passive_open_func(std::move(opened_channel), std::move(mdt));
@@ -1374,7 +1523,7 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
   using transport::Socket_stream_channel_of_blobs;
   namespace asio_local = transport::asio_local_stream_socket::local_ns;
   using asio_local::connect_pair;
-  using transport::asio_local_stream_socket::Peer_socket;
+  using Peer_socket = transport::asio_local_stream_socket::Peer_socket<transport::Native_socket_stream_cfg::Protocol>;
   using flow::util::ostream_op_string;
 
   // We are in thread W.
@@ -1397,31 +1546,31 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
   {
     Native_handle local_hndl;
 
-    Peer_socket local_hndl_asio(*m_async_worker.task_engine());
-    Peer_socket remote_hndl_asio(std::move(local_hndl_asio));
+    Peer_socket local_hndl_asio{*m_async_worker.task_engine()};
+    Peer_socket remote_hndl_asio{std::move(local_hndl_asio)};
     connect_pair(local_hndl_asio, remote_hndl_asio, sys_err_code);
     if (sys_err_code)
     {
       FLOW_LOG_WARNING("Server session [" << *this << "]: Open-channel (active? = [" << active_else_passive << "]): "
-                       "connect_pair() failed.  Not fatal to the session; will inform the remote peer (client) "
+                       "connect_pair() failed.  Not fatal to the session; will inform the opposing peer (client) "
                        "(if passive-open) or caller (if active-open).  Details follow.");
       FLOW_ERROR_SYS_ERROR_LOG_WARNING(); // Log based on sys_err_code.
       return false;
     }
     // else
-    local_hndl = Native_handle(local_hndl_asio.release());
-    remote_hndl_or_null = Native_handle(remote_hndl_asio.release());
+    local_hndl = Native_handle{local_hndl_asio.release()};
+    remote_hndl_or_null = Native_handle{remote_hndl_asio.release()};
 
     FLOW_LOG_TRACE("Server session [" << *this << "]: Open-channel (active? = [" << active_else_passive << "]): "
                    "connect_pair() generated native handles [" << local_hndl << "], [" << remote_hndl_or_null << "], "
-                   "the latter to be transmitted to remote peer (client).");
-    local_sock_stm_or_null = Native_socket_stream(get_logger(), nickname, std::move(local_hndl));
+                   "the latter to be transmitted to opposing peer (client).");
+    local_sock_stm_or_null = Native_socket_stream{get_logger(), nickname, std::move(local_hndl)};
 
     // Please see Native_socket_stream::remote_peer_process_credentials() doc header for explanation of this.
     {
       Error_code err_code;
       local_sock_stm_or_null.remote_peer_process_credentials(m_master_channel->owned_channel()
-                                                               .remote_peer_process_credentials(&err_code));
+                                                               ->remote_peer_process_credentials(&err_code));
       assert((!err_code) && "By contract that should only fail if the socket got hosed via transmission; but "
                             "it is a local socket we just established; so there is no way.");
     }
@@ -1447,8 +1596,8 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
                                    Mqs_socket_stream_channel<true, Persistent_mq_handle_from_cfg>>, "Sanity check.");
       if (make_sock_stm_func())
       {
-        opened_channel = Channel_obj(get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s),
-                                     std::move(local_sock_stm_or_null), &sys_err_code);
+        opened_channel = Channel_obj{get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s),
+                                     std::move(local_sock_stm_or_null), &sys_err_code};
       }
       else
       {
@@ -1460,19 +1609,19 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
     {
       static_assert(std::is_same_v<Channel_obj,
                                    Mqs_channel<true, Persistent_mq_handle_from_cfg>>, "Sanity check.");
-      opened_channel = Channel_obj(get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s), &sys_err_code);
+      opened_channel = Channel_obj{get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s), &sys_err_code};
     }
 
     if (sys_err_code)
     {
       // Clean up the stuff that *was* created OK.  Use tactic from inside error path in make_channel_mqs().
-      mq_c2s = Persistent_mq_handle_from_cfg();
-      mq_s2c = Persistent_mq_handle_from_cfg();
+      mq_c2s = {};
+      mq_s2c = {};
       Error_code ignored;
       Persistent_mq_handle_from_cfg::remove_persistent(get_logger(), mq_name_c2s_or_none, &ignored);
       Persistent_mq_handle_from_cfg::remove_persistent(get_logger(), mq_name_s2c_or_none, &ignored);
 
-      opened_channel = Channel_obj(); // For cleanliness / no pointless threads sitting around....
+      opened_channel = Channel_obj{}; // For cleanliness / no pointless threads sitting around....
       return false;
     }
     // else { Yay! }
@@ -1487,15 +1636,15 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
     }
     // else
 
-    if constexpr(S_TRANSMIT_NATIVE_HANDLES)
+    if constexpr(TRANSMIT_NATIVE_HANDLES)
     {
       static_assert(std::is_same_v<Channel_obj, Socket_stream_channel<true>>, "Sanity check.");
-      opened_channel = Channel_obj(get_logger(), nickname, std::move(local_sock_stm_or_null)); // Yay!
+      opened_channel = Channel_obj{get_logger(), nickname, std::move(local_sock_stm_or_null)}; // Yay!
     }
     else
     {
       static_assert(std::is_same_v<Channel_obj, Socket_stream_channel_of_blobs<true>>, "Sanity check.");
-      opened_channel = Channel_obj(get_logger(), nickname, std::move(local_sock_stm_or_null)); // Yay!
+      opened_channel = Channel_obj{get_logger(), nickname, std::move(local_sock_stm_or_null)}; // Yay!
     }
   } // else if constexpr(!S_MQS_ENABLED)
 
@@ -1526,29 +1675,43 @@ bool CLASS_SRV_SESSION_IMPL::make_channel_mqs(Persistent_mq_handle_from_cfg* mq_
    * any would-block situation due to reaching this limit.  In theory it could affect perf. */
   constexpr size_t MAX_N_MSG = 10;
 
-  /* We must also decide the max message of each size.  If SHM-backing is disabled, then there's no question:
-   * we have to use Base::S_MQS_MAX_MSG_SZ which (see its doc header) respects both the need to be as large
-   * as possible to support the widest variety of user payloads; and the (POSIX-MQ-relevant) system limit(s) as
-   * to the message size.  If SHM-backing is enabled, it is tempting to simply use the same value... why not,
-   * right?  Good enough for the heap-backed case; why not the SHM-backed case?  At worst it only wastes some
-   * RAM, since each message transmitted over MQ contains merely a tiny SHM handle, right?  Yes and no:
-   * For bipc MQs, yes; but POSIX MQs impose yet another limit: A given process trying to maintain a *total*
-   * of X bytes of MQs at a given time (the "total" roughly meaning the sum of `MAX_N_MSG x max_msg_sz` for
-   * all then-opened MQs) will yield too-many-files (Linux errno=EMFILES) once X is exceeded.  A typical value
-   * for this is 819,200 -- or up to only *ten* MAX_N_MSxMQS_MAX_MSG_SZ such MQs opened simultaneously.
-   * This is in practice easily exceeded.  On the other hand, suppose we instead use S_SHM_MAX_HNDL_SZ
-   * instead of MQS_MAX_MSG_SZ -- which is sufficient, since we'll only be sending SHM handles, not the actual
-   * data.  As of this writing it's 64; so that's 8,192/64=128 *times* the number of MQs creatable this way;
-   * errno=EMFILES occurs not after 10 MQs now but after 1,280 such MQs.  Much more reasonable.
-   * Trust me (ygoldfel): the ~10-MQ limit can be quite annoying. */
   size_t max_msg_sz;
-  if constexpr(S_SHM_ENABLED)
+  const auto cfg_limit_or_zero = m_mq_msg_size_limit_func();
+  if (cfg_limit_or_zero == 0) // Means pick a value ourselves.
   {
-    max_msg_sz = S_SHM_MAX_HNDL_SZ;
+    /* We must also decide the max message of each size.  If SHM-backing is disabled, then there's no question:
+     * we have to use Base::S_MQS_MAX_MSG_SZ which (see its doc header) respects both the need to be as large
+     * as possible to support the widest variety of user payloads; and the (POSIX-MQ-relevant) system limit(s) as
+     * to the message size.  If SHM-backing is enabled, it is tempting to simply use the same value... why not,
+     * right?  Good enough for the heap-backed case; why not the SHM-backed case?  At worst it only wastes some
+     * RAM, since each message transmitted over MQ contains merely a tiny SHM handle, right?  Yes and no:
+     * For bipc MQs, yes; but POSIX MQs impose yet another limit: A given process trying to maintain a *total*
+     * of X bytes of MQs at a given time (the "total" roughly meaning the sum of `MAX_N_MSG x max_msg_sz` for
+     * all then-opened MQs) will yield too-many-files (Linux errno=EMFILES) once X is exceeded.  A typical value
+     * for this is 819,200 -- or up to only *ten* MAX_N_MSxMQS_MAX_MSG_SZ such MQs opened simultaneously.
+     * This is in practice easily exceeded.  On the other hand, suppose we instead use SHM_MAX_HNDL_SZ
+     * instead of MQS_MAX_MSG_SZ -- which is sufficient, since we'll only be sending SHM handles, not the actual
+     * data.  As of this writing it's 512; so that's 8,192/512=16 *times* the number of MQs creatable this way;
+     * errno=EMFILES occurs not after 10 MQs now but after 160 such MQs.  Much more reasonable.
+     * Trust me (ygoldfel): the ~10-MQ limit can be quite annoying.
+     *
+     * Update/correction: We say there, "we'll only be sending SHM handles, not the actual data."  However that
+     * assumes that (1) any channel opened will in fact be upgraded to a struc::Channel; and (2) that struc::Channel
+     * will use the SHM-backed serializer for its `Msg_out`s.  Neither is certain at all.  So that's why
+     * the user can override our chosen default here (hence m_mq_msg_size_limit_func() call).  The chosen default
+     * does make those assumptions (and we documented this in Session_server::mq_msg_size_limit() doc header). */
+    if constexpr(S_SHM_ENABLED)
+    {
+      max_msg_sz = SHM_MAX_HNDL_SZ;
+    }
+    else
+    {
+      max_msg_sz = Base::S_MQS_MAX_MSG_SZ;
+    }
   }
   else
   {
-    max_msg_sz = Base::S_MQS_MAX_MSG_SZ;
+    max_msg_sz = cfg_limit_or_zero;
   }
 
   ++m_last_channel_mq_id;
@@ -1571,21 +1734,21 @@ bool CLASS_SRV_SESSION_IMPL::make_channel_mqs(Persistent_mq_handle_from_cfg* mq_
 
   const auto perms = util::shared_resource_permissions(Base::m_srv_app_ref.m_permissions_level_for_client_apps);
 
-  *mq_c2s = Persistent_mq_handle_from_cfg(get_logger(), mq_name_func(true), util::CREATE_ONLY,
-                                          MAX_N_MSG, max_msg_sz, perms, err_code);
+  *mq_c2s = Persistent_mq_handle_from_cfg{get_logger(), mq_name_func(true), util::CREATE_ONLY,
+                                          MAX_N_MSG, max_msg_sz, perms, err_code};
   if (*err_code)
   {
     --m_last_channel_mq_id; // Might as well.
     return false;
   }
   // else
-  *mq_s2c = Persistent_mq_handle_from_cfg(get_logger(), mq_name_func(false), util::CREATE_ONLY,
-                                          MAX_N_MSG, max_msg_sz, perms, err_code);
+  *mq_s2c = Persistent_mq_handle_from_cfg{get_logger(), mq_name_func(false), util::CREATE_ONLY,
+                                          MAX_N_MSG, max_msg_sz, perms, err_code};
   if (*err_code)
   {
     --m_last_channel_mq_id; // Might as well.
     const auto name = mq_c2s->absolute_name();
-    *mq_c2s = Persistent_mq_handle_from_cfg(); // Close the first guy; won't be used.
+    *mq_c2s = {}; // Close the first guy; won't be used.
     Error_code ignored; // Don't forget to remove underlying MQ we'd successfully created.
     Persistent_mq_handle_from_cfg::remove_persistent(get_logger(), name, &ignored);
     return false;
@@ -1601,15 +1764,14 @@ template<typename Session_server_impl_t,
          typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
          typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
 void CLASS_SRV_SESSION_IMPL::async_accept_log_in
-       (Session_server_impl_t*,
-        // (^-- Unused here; but it's a customization point across multiple class templates.)
+       (Session_server_impl_t* srv,
         Channels* init_channels_by_srv_req, Mdt_reader_ptr* mdt_from_cli_or_null, Channels* init_channels_by_cli_req,
         Cli_app_lookup_func&& cli_app_lookup_func, Cli_namespace_func&& cli_namespace_func,
         Pre_rsp_setup_func&& pre_rsp_setup_func,
         N_init_channels_by_srv_req_func&& n_init_channels_by_srv_req_func, Mdt_load_func&& mdt_load_func,
         Task_err&& on_done_func)
 {
-  using util::Process_credentials;
+  using util::NULL_PROCESS_CREDENTIALS;
   using flow::async::Task_asio_err;
   using flow::util::ostream_op_string;
   using boost::make_shared;
@@ -1623,7 +1785,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
   m_log_in_on_done_func = std::move(on_done_func); // May be invoked from thread W or thread U (dtor) (it's a race).
 
   // Kick off all work from thread W to avoid concurrency.
-  m_async_worker.post([this,
+  m_async_worker.post([this, srv,
                        init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
                        cli_app_lookup_func = std::move(cli_app_lookup_func),
                        cli_namespace_func = std::move(cli_namespace_func),
@@ -1634,12 +1796,21 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
   {
     // We are in thread W.
 
+    if constexpr(S_MQS_ENABLED)
+    {
+      assert(m_mq_msg_size_limit_func.empty() && "Did we call async_accept_log_in() more than once?  Bug?");
+
+      /* (See this guy's doc header, if you're wondering why we're storing this functor and not "just" saving
+       * an `m_srv = srv` or some-such.) */
+      m_mq_msg_size_limit_func = [srv]() -> size_t { return srv->mq_msg_size_limit(); };
+    }
+
     /* We'll want to check these OS-reported remote-process credentials against something during the log-in
      * procedure that is coming next; per remote_peer_process_credentials() doc header it's best to call it
      * first-thing (before traffic if possible) so let's. */
     Error_code err_code;
     string os_proc_invoked_as;
-    const auto os_proc_creds = m_master_sock_stm.remote_peer_process_credentials(&err_code);
+    const auto& os_proc_creds = m_master_sock_stm.remote_peer_process_credentials(&err_code);
     if (err_code)
     {
       FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in request: We have the freshly-accepted "
@@ -1661,7 +1832,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
     if (err_code)
     {
       // Might as well do it now instead of waiting for dtor (kind of consistent with m_master_channel.reset() below).
-      m_master_sock_stm = transport::sync_io::Native_socket_stream();
+      m_master_sock_stm = {};
 
       m_log_in_on_done_func(err_code);
       FLOW_LOG_TRACE("Handler finished.");
@@ -1677,10 +1848,10 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                   "we will issue the user handler indicating the session is ready.");
 
     transport::Socket_stream_channel<true>
-      unstructured_master_channel(get_logger(), ostream_op_string("smc-", *this),
-                                  std::move(m_master_sock_stm));
+      unstructured_master_channel{get_logger(), ostream_op_string("smc-", *this),
+                                  std::move(m_master_sock_stm)};
     {
-      const auto opposing_proc_creds = unstructured_master_channel.remote_peer_process_credentials(&err_code);
+      const auto& opposing_proc_creds = unstructured_master_channel.remote_peer_process_credentials(&err_code);
       assert((!err_code) && "It really should not fail that early.  If it does look into this code.");
       FLOW_LOG_INFO("Server session [" << *this << "]: Opposing process info: [" << opposing_proc_creds << "].");
     }
@@ -1772,17 +1943,17 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
              * which protocol-version to speak (query m_protocol_negotiator.negotiated_proto_ver(); other Session
              * hierarchies can query m_protocol_negotiator_aux.<same>()). */
 
-            if ((msg_root.getShmTypeOrNone() != S_SHM_TYPE)
-                || (msg_root.getMqTypeOrNone() != S_MQ_TYPE_OR_NONE)
-                || (msg_root.getNativeHandleTransmissionEnabled() != S_TRANSMIT_NATIVE_HANDLES))
+            if ((msg_root.getShmTypeOrNone() != S_SHM_TYPE_OR_NONE)
+                || (msg_root.getMqTypeOrNone() != MQ_TYPE_OR_NONE)
+                || (msg_root.getNativeHandleTransmissionEnabled() != TRANSMIT_NATIVE_HANDLES))
             {
               FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received; "
                                "but client desired process SHM/channel config (SHM-type "
                                "[" << int(msg_root.getShmTypeOrNone()) << "], MQ-type "
                                "[" << int(msg_root.getMqTypeOrNone()) << "], transmit-native-handles? = "
                                "[" << msg_root.getNativeHandleTransmissionEnabled() << "]) "
-                               "does not match our local config ([" << int(S_SHM_TYPE) << '/'
-                               << int(S_MQ_TYPE_OR_NONE) << '/' << S_TRANSMIT_NATIVE_HANDLES << "]).  "
+                               "does not match our local config ([" << int(S_SHM_TYPE_OR_NONE) << '/'
+                               << int(MQ_TYPE_OR_NONE) << '/' << TRANSMIT_NATIVE_HANDLES << "]).  "
                                "Perhaps the other side used Client_session variant class not matching local "
                                "Server_session variant class and/or different template parameters.  "
                                "Closing session master channel and reporting to user via on-accept-log-in handler.");
@@ -1802,17 +1973,13 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
               }
               else // if (n_init_channels_by_cli_req is OK)
               {
-                /* @todo We are assuming good-faith here about the message's contents; should probably be more paranoid
-                 * for consistency regarding, like, a null claimed_own_proc_creds.  Change assert() to a real error
-                 * maybe, etc. */
-                assert(msg_root.hasClaimedOwnProcessCredentials());
+                const auto& claimed_proc_creds = m_master_channel->remote_peer_process_credentials();
+                assert((&claimed_proc_creds != &NULL_PROCESS_CREDENTIALS) &&
+                       "struc::Channel::remote_peer_process_credentials() would return (here) null only if "
+                         "no session-master-channel message handler has been executed (but we are in one), or "
+                         "if the struc::Channel were hosed (but if it were, we would not be here either).");
 
-                auto claimed_proc_creds_root = msg_root.getClaimedOwnProcessCredentials();
-                const Process_credentials claimed_proc_creds(claimed_proc_creds_root.getProcessId(),
-                                                             claimed_proc_creds_root.getUserId(),
-                                                             claimed_proc_creds_root.getGroupId());
-
-                const string cli_app_name(msg_root.getOwnApp().getName());
+                const string cli_app_name{msg_root.getOwnApp().getName()};
                 const Client_app* const cli_app_ptr_or_null = cli_app_lookup_func(cli_app_name);
 
                 if ((!cli_app_ptr_or_null) ||
@@ -1834,7 +2001,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
 
                   /* Nice, the other side's Client_app is valid and allowed.  Run safety checks on claimed_proc_creds;
                    * they must reconfirm the Client_app they mean is the Client_app we know by checking for consistency
-                   * of the values against our Client_app config; plus ensure consistency by checking gainst the
+                   * of the values against our Client_app config; plus ensure consistency by checking against the
                    * OS-reported values (in case it's some kind snafu or spoofing or who knows). */
                   if ((claimed_proc_creds != os_proc_creds)
                       || (Base::cli_app_ptr()->m_exec_path.string() != os_proc_invoked_as)
@@ -1895,11 +2062,11 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                           typename Mdt_reader_ptr::element_type m_mdt_reader;
                           typename Master_structured_channel::Msg_in_ptr m_req;
                         };
-                        shared_ptr<Req_and_mdt_reader> req_and_mdt(new Req_and_mdt_reader
+                        shared_ptr<Req_and_mdt_reader> req_and_mdt{new Req_and_mdt_reader
                                                                          { msg_root.getMetadata(),
-                                                                           std::move(log_in_req) });
+                                                                           std::move(log_in_req) }};
                         // (log_in_req is now hosed.)
-                        mdt_from_cli = Mdt_reader_ptr(std::move(req_and_mdt), &req_and_mdt->m_mdt_reader);
+                        mdt_from_cli = Mdt_reader_ptr{std::move(req_and_mdt), &req_and_mdt->m_mdt_reader};
                       } // {}
 
                       // Secondly: n_init_channels (we have n_init_channels_by_cli_req; now add the local count).
@@ -1908,7 +2075,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       {
                         n_init_channels += n_init_channels_by_srv_req_func(*(Base::cli_app_ptr()),
                                                                            n_init_channels_by_cli_req,
-                                                                           Mdt_reader_ptr(mdt_from_cli));
+                                                                           Mdt_reader_ptr{mdt_from_cli});
                       }
 
                       // Thirdly: srv->cli metadata.  This goes inside LogInRsp; so create that now.
@@ -1916,7 +2083,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       auto log_in_rsp_root = log_in_rsp_msg.body_root()->initLogInRsp();
                       auto mdt_from_srv_root = log_in_rsp_root.initMetadata();
                       // And let them fill it out.
-                      mdt_load_func(*(Base::cli_app_ptr()), n_init_channels_by_cli_req, Mdt_reader_ptr(mdt_from_cli),
+                      mdt_load_func(*(Base::cli_app_ptr()), n_init_channels_by_cli_req, Mdt_reader_ptr{mdt_from_cli},
                                     &mdt_from_srv_root); // They load this (if they want).
 
                       // Now we can send the log-in response finally.
@@ -1930,7 +2097,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                       log_in_rsp_root.setNumInitChannelsBySrvReq(n_init_channels - n_init_channels_by_cli_req);
 
                       assert(!err_code);
-                      if (!m_master_channel->send(log_in_rsp_msg, log_in_req_saved, &err_code))
+                      if (!m_master_channel->send(&log_in_rsp_msg, log_in_req_saved, &err_code))
                       {
                         /* The docs say send() returns false if:
                          * "`msg` with-handle, but #Owner_channel has no handles pipe; an #Error_code was previously
@@ -2004,6 +2171,16 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
             *mdt_from_cli_or_null = std::move(mdt_from_cli);
           }
 
+          if (!err_code)
+          {
+            /* We're about to succeed with the whole thing and make the Server_session available to user, so
+             * info_collector() must work from now on.
+             * @todo There's another (just one) success path below, as of this writing, and we have to do this
+             * there too.  It'd be good to automate doing this on successful return, to make maintenance easier.
+             * Like maybe wrap m_log_in_on_done_func (only if it gets success Error_code passed to it!). */
+            m_info_collector.emplace(Info_collector_dtl::ct_base(m_master_channel));
+          }
+
           m_log_in_on_done_func(err_code);
           FLOW_LOG_TRACE("Handler finished.");
           m_log_in_on_done_func.clear();
@@ -2038,8 +2215,8 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
           /* Expect quick reply to the last one (we don't even check contents; it's just an ack, so
            * `ok` = <it returned non-null>).  @todo Consider using timeout sync_request() overload just in case. */
           ok = (idx == (n_init_channels - 1))
-                 ? bool(m_master_channel->sync_request(open_channel_req_msg, nullptr, &err_code))
-                 : (m_master_channel->send(open_channel_req_msg, nullptr, &err_code)
+                 ? bool(m_master_channel->sync_request(&open_channel_req_msg, nullptr, &err_code))
+                 : (m_master_channel->send(&open_channel_req_msg, nullptr, &err_code)
                       && (!err_code));
         } // for (idx in n_init_channels)
 
@@ -2084,6 +2261,10 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
           }
 
           assert(!err_code);
+
+          /* We're about to succeed with the whole thing and make the Server_session available to user, so
+           * info_collector() must work from now on. */
+          m_info_collector.emplace(Info_collector_dtl::ct_base(m_master_channel));
         } // if (ok)
         else // if (!ok)
         {
@@ -2134,7 +2315,7 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_error(const Error_code& err_code)
   /* (If you are comparing this to Client_session::on_master_channel_error(), you might notice this is a lot simpler
    * (at least in the log-in phase); that is because Client_session supports multiple async_connect()s in series
    * (if 1 or more fail), so m_master_channel can be nullified and then again constructed.  In our case
-   * async_accept_log_in() is a protected API, made public via Server_session_dtl to Session_server
+   * async_accept_log_in() is a private API, made public via Server_session_dtl to Session_server
    * only, and therefore (due to having a limited internal use case) can be only called 1x, by contract.
    * Hence there is no chance of getting an err_code that pertains to some past m_master_channel and all that
    * stuff; so we don't need that observer weak_ptr stuff.  It's a much simpler state machine (there's no m_state
@@ -2144,7 +2325,7 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_error(const Error_code& err_code)
   {
     FLOW_LOG_TRACE("Server session [" << *this << "]: Session master channel reported error; but the source "
                    "master channel has since been destroyed; so presumably the log-in request was received "
-                   "from remote client, and it was invalid, so the channel was destroyed by our log-in request "
+                   "from opposing client, and it was invalid, so the channel was destroyed by our log-in request "
                    "handler; but coincidentally before that destruction could occur an incoming-direction "
                    "channel error occurred.  The error does not matter anymore.  Ignoring.");
     return;
@@ -2182,10 +2363,12 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_error(const Error_code& err_code)
   }
   // else if (handlers_are_set()): We are in PEER state.  Here the logic is similar to Client_session_impl again:
 
-  if (!Base::hosed())
+  if ((!m_dtor_started) && (!Base::hosed()))
   {
     Base::hose(err_code);
   }
+  /* else if (m_dtor_started): Session is already being destroyed of the user's volition; don't bug them.
+   * else if (hosed()): No need to hose if already hosed (the usual pre-condition for hose()). */
 
   if constexpr(S_GRACEFUL_FINISH_REQUIRED)
   {
@@ -2240,7 +2423,7 @@ std::ostream& operator<<(std::ostream& os, const CLASS_SRV_SESSION_IMPL& val)
   os << '[' << val.m_srv_app_ref.m_name << "<-" << (cli_app_ptr ? cli_app_ptr->m_name : string("unknown-cli"));
   if constexpr(CLASS_SRV_SESSION_IMPL::S_SHM_ENABLED)
   {
-    os << " | shm_type=" << int(CLASS_SRV_SESSION_IMPL::S_SHM_TYPE);
+    os << " | shm_type=" << int(CLASS_SRV_SESSION_IMPL::S_SHM_TYPE_OR_NONE);
   }
   return os << "]@" << static_cast<const void*>(&val);
 }

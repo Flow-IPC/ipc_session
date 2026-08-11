@@ -35,10 +35,6 @@ $Cxx.namespace("ipc::session::schema");
 
 # --- END Header.
 
-using ProcessId = Int32; # Matches Linux definition at least.
-using UserId = UInt32; # Matches Linux definition at least.
-using GroupId = UInt32; # Matches Linux definition at least.
-
 enum MqType
 {
   # Type of kernel-persistent message queue (MQ).
@@ -69,11 +65,4 @@ enum ShmType
   # SHM provider: ipc::shm::arena_lend::jemalloc.
 
   endSentinel @3;
-}
-
-struct ProcessCredentials
-{
-  processId @0 :ProcessId;
-  userId @1 :UserId;
-  groupId @2 :GroupId;
 }

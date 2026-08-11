@@ -19,6 +19,7 @@
 #pragma once
 
 #include "ipc/session/session_fwd.hpp"
+#include <utility>
 
 namespace ipc::session
 {
@@ -26,134 +27,78 @@ namespace ipc::session
 // Types.
 
 /**
- * This is the data-less sub-class of Server_session or any more-advanced (e.g., SHM-capable) variant thereof
- * that exposes `protected` APIs hidden from public user by providing public access to them; this is used internally
+ * This is the `friend` facade of Server_session or any more-advanced (e.g., SHM-capable) variant thereof
+ * that exposes `private` APIs hidden from public user by providing public access to them; this is used internally
  * by Session_server.  The background is briefly explained in the impl section of Server_session doc header.
  *
- * @tparam Server_session_t
- *         The object whose `protected` stuff to expose.
+ * @tparam Base_t
+ *         The type of object whose specific `private` API to expose.
  */
-template<typename Server_session_t>
-class Server_session_dtl :
-  public Server_session_t
+template<typename Base_t>
+struct Server_session_dtl
 {
-public:
   // Types.
 
-  /// Short-hand for base class.
-  using Base = Server_session_t;
+  /// Short-hand for wrapped class.
+  using Base = Base_t;
 
-  /// See `protected` counterpart.
+  /// See #Base counterpart.
   using Session_base_obj = typename Base::Session_base_obj;
 
-  // Constructors/destructor.
+  // Data.
 
-  /**
-   * See `protected` counterpart.
-   *
-   * @param logger_ptr
-   *        See `protected` counterpart.
-   * @param srv_app_ref
-   *        See `protected` counterpart.
-   * @param master_channel_sock_stm
-   *        See `protected` counterpart.
-   */
-  explicit Server_session_dtl(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
-                              transport::sync_io::Native_socket_stream&& master_channel_sock_stm);
+  /// Direct-initializable wrapped object.  Access `public` API through this reference; `private` API via `*this`.
+  Base& m_base;
 
   // Methods.
 
   /**
-   * See `protected` counterpart.
-   *
-   * @param srv
-   *        See `protected` counterpart.
-   * @param init_channels_by_srv_req
-   *        See `protected` counterpart.
-   * @param mdt_from_cli_or_null
-   *        See `protected` counterpart.
-   * @param init_channels_by_cli_req
-   *        See `protected` counterpart.
-   * @param cli_app_lookup_func
-   *        See `protected` counterpart.
-   * @param cli_namespace_func
-   *        See `protected` counterpart.
-   * @param pre_rsp_setup_func
-   *        See `protected` counterpart.
-   * @param n_init_channels_by_srv_req_func
-   *        See `protected` counterpart.
-   * @param mdt_load_func
-   *        See `protected` counterpart.
-   * @param on_done_func
-   *        See `protected` counterpart.
+   * Forwards to #Base ctor(s).
+   * @param ctor_args
+   *        See above.
+   * @return New #Base.
    */
-  template<typename Session_server_impl_t,
-           typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
-           typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
-  void async_accept_log_in(Session_server_impl_t* srv,
-                           typename Base::Channels* init_channels_by_srv_req,
-                           typename Base::Mdt_reader_ptr* mdt_from_cli_or_null,
-                           typename Base::Channels* init_channels_by_cli_req,
-                           Cli_app_lookup_func&& cli_app_lookup_func, Cli_namespace_func&& cli_namespace_func,
-                           Pre_rsp_setup_func&& pre_rsp_setup_func,
-                           N_init_channels_by_srv_req_func&& n_init_channels_by_srv_req_func,
-                           Mdt_load_func&& mdt_load_func,
-                           Task_err&& on_done_func);
+  template<typename... Ctor_args>
+  static auto ct_base(Ctor_args&&... ctor_args) -> Base;
+  // @todo See definition for reason for the odd --^-- signature form (Doxygen).
 
   /**
-   * Provides `const` access to Session_base super-object.
+   * See #Base counterpart.
+   * @param args
+   *        See above.
+   */
+  template<typename... Args>
+  void async_accept_log_in(Args&&... args);
+
+  /**
+   * See #Base counterpart.
    * @return See above.
    */
   const Session_base_obj& base() const;
-}; // class Server_session_dtl
+}; // struct Server_session_dtl
 
 // Template implementations.
 
-/// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
-#define TEMPLATE_SRV_SESSION_DTL \
-  template<typename Server_session_t>
-/// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
-#define CLASS_SRV_SESSION_DTL \
-  Server_session_dtl<Server_session_t>
-
-TEMPLATE_SRV_SESSION_DTL
-CLASS_SRV_SESSION_DTL::Server_session_dtl(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
-                                          transport::sync_io::Native_socket_stream&& master_channel_sock_stm) :
-  Base(logger_ptr, srv_app_ref, std::move(master_channel_sock_stm))
+template<typename Base_t>
+template<typename... Ctor_args>
+auto Server_session_dtl<Base_t>::ct_base(Ctor_args&&... ctor_args) -> Base_t
+// Doxygen 1.9.4 gets confused here otherwise; the `->` form is a work-around for that.  @todo Revisit with later ver.
 {
-  // Yep.
+  return Base{std::forward<Ctor_args>(ctor_args)...};
 }
 
-TEMPLATE_SRV_SESSION_DTL
-template<typename Session_server_impl_t,
-         typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
-         typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
-void CLASS_SRV_SESSION_DTL::async_accept_log_in
-       (Session_server_impl_t* srv,
-        typename Base::Channels* init_channels_by_srv_req,
-        typename Base::Mdt_reader_ptr* mdt_from_cli_or_null,
-        typename Base::Channels* init_channels_by_cli_req,
-        Cli_app_lookup_func&& cli_app_lookup_func,
-        Cli_namespace_func&& cli_namespace_func,
-        Pre_rsp_setup_func&& pre_rsp_setup_func,
-        N_init_channels_by_srv_req_func&& n_init_channels_by_srv_req_func,
-        Mdt_load_func&& mdt_load_func,
-        Task_err&& on_done_func)
+template<typename Base_t>
+template<typename... Args>
+void Server_session_dtl<Base_t>::async_accept_log_in(Args&&... args)
 {
-  Base::async_accept_log_in(srv, init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
-                            std::move(cli_app_lookup_func), std::move(cli_namespace_func),
-                            std::move(pre_rsp_setup_func),
-                            std::move(n_init_channels_by_srv_req_func), std::move(mdt_load_func),
-                            std::move(on_done_func));
+  m_base.async_accept_log_in(std::forward<Args>(args)...);
 }
 
-TEMPLATE_SRV_SESSION_DTL
-const typename CLASS_SRV_SESSION_DTL::Session_base_obj& CLASS_SRV_SESSION_DTL::base() const
+template<typename Base_t>
+const typename Server_session_dtl<Base_t>::Session_base_obj&
+  Server_session_dtl<Base_t>::base() const
 {
-  return Base::base();
+  return m_base.base();
 }
-
-#undef CLASS_SRV_SESSION_DTL
-#undef TEMPLATE_SRV_SESSION_DTL
 
 } // namespace ipc::session

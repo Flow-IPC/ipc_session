@@ -44,6 +44,16 @@ namespace ipc::session
  * However, to be useful, we suggest the following convention.  Some key ipc::session APIs may rely on it.
  *
  * ### App, Client_app, Server_app registry conventions ###
+ *
+ * @warning Right off the bat, hopefully where it's visible, we alert you to a gotcha.  It is implied below,
+ *          but to put a fine point on it: Once you've set up your App, Client_app, Server_app objects,
+ *          they need to stay alive at least past any session::Client_session and session::Session_server
+ *          objects into which you pass their reference(s).  They will not be copied, and if they're destroyed
+ *          early, you may be hit by nasty accessing-invalid-memory undefined behaviors including but not limited
+ *          to crashing.
+ *
+ * Back to the conventions:
+ *
  * - Maintain a global (to the applications in your IPC universe) registry of known applications.  It could be
  *   stored in JSON or XML form in some central shared software component and read-into a master `set` or
  *   `unordered_set` (by App::m_name; see its doc header) available in a centrally-available library;
@@ -122,13 +132,13 @@ struct App
    * and that brings an annoying host of worries.  Indexing by string name is solid by comparison, if a bit slower.
    *
    * ### Conventions: Naming ###
-   * Must begin with an ASCII alphabetical character and otherwise consist of only ASCII alphanumerics and underscores.
-   * While these are partially conventions driven by style (for example, dashes could also be allowed -- we just
-   * do not want them to be, so that underscores are always the word-separator used consistently), the following
+   * Must begin with an ASCII alphabetical character and otherwise consist of only ASCII alphanumerics
+   * (so, notably, *no underscores*: use camelCase to separate words, per the convention for #Shared_name
+   * components; see its doc header).  While that is partially style-driven, the following
    * is an important guarantee for related #Shared_name and `fs::path` semantics:
-   *   - Must not contain a util::Shared_name::S_SEPARATOR.
+   *   - Must not contain a util::Shared_name::S_SEPARATOR (which, notably, is the underscore).
    *   - Must not contain a forward-slash or any other file system path separator.
-   *   - Must not contain a dot or any other conceivable extension separator (other than underscore).
+   *   - Must not contain a dot or any other conceivable extension separator.
    *
    * Therefore:
    *   - In #Shared_name paths one can embed #m_name by preceding and/or succeeding it with a
@@ -137,9 +147,14 @@ struct App
    *     forward-slash, thus making it a full or partial directory name.
    *   - In either: one can embed #m_name by preceding and/or succeeding it with a dot as an extension separator.
    *
-   * So if #m_name is "abc_def" one can do things like "/some/dir/abc_def/some_file" and "/some/dir/abc_def.pid/file"
-   * and "/some/dir/prefix.abc_def.3".  I.e., #m_name can be safely used as a conceptual "token," even when
-   * combined with path/name separators and dot-extension naming.
+   * @note Enforced, in part: Session_server ctor (all variants) emits error::Code::S_INVALID_ARGUMENT, if the
+   *       Server_app's -- or any registered Client_app's -- #m_name is empty or contains
+   *       util::Shared_name::S_SEPARATOR.
+   *
+   * So if #m_name is "abcDef" one can do things like "/some/dir/abcDef/some_file" and "/some/dir/abcDef.pid/file"
+   * and "/some/dir/prefix.abcDef.3" (file-system example) or "_some_dir_abcDef_moreStuff" (`Shared_name` example).
+   * I.e., #m_name can be safely used as a conceptual "token," even when combined with path/name separators and
+   * dot-extension naming.
    */
   std::string m_name;
 

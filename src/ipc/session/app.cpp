@@ -57,13 +57,13 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
   int native_handle = open(path.c_str(), O_PATH);
   if (native_handle == -1)
   {
-    *err_code = Error_code(errno, system_category());
+    *err_code = {errno, system_category()};
     FLOW_LOG_WARNING("Tried to check ownership of resource at [" << path << "] but while obtaining info-only handle "
                      "encountered error [" << *err_code << "] [" << err_code->message() << "]; unable to check.");
     return;
   }
   // else
-  Native_handle handle(native_handle);
+  Native_handle handle{native_handle};
 
   // For nicer messaging add some more logging on error.  A little code duplication, but it's OK.
   ensure_resource_owner_is_app(logger_ptr, handle, app, err_code);
@@ -105,7 +105,7 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_ha
   const auto rc = fstat(handle.m_native_handle, &stats);
   if (rc == -1)
   {
-    *err_code = Error_code(errno, system_category());
+    *err_code = {errno, system_category()};
     FLOW_LOG_WARNING("Tried to check ownership via descriptor/handle [" << handle << "] but encountered "
                      "error [" << *err_code << "] [" << err_code->message() << "]; unable to check.");
   }

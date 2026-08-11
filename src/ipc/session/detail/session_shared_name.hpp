@@ -29,10 +29,10 @@ namespace ipc::session
  * #include "ipc/util/shared_name.hpp" would be needed -- not cool in a _fwd.hpp.  Secondly there's the
  * many references to Shared_name -- which session_fwd.hpp aliases to util::Shared_name -- but session_fwd.hpp
  * needs detail/session_fwd.hpp for other reasons; so this creates a circular issue.  Because of these,
- * it's not in detail/session_fwd.hpp; nor in some kind of seaparate session_shared_name_fwd.hpp either.
+ * it's not in detail/session_fwd.hpp; nor in some kind of separate session_shared_name_fwd.hpp either.
  *
  * It's not really a huge deal, but it *is* a break from the recommended _fwd.hpp convention; seemed worth
- * explaining. */
+ * explaining.  @todo Revisit. */
 
 // Free functions.
 

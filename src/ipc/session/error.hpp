@@ -138,7 +138,7 @@ Error_code make_error_code(Code err_code);
  * @return See above.
  */
 std::istream& operator>>(std::istream& is, Code& val);
-// @todo - `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
+// @todo `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
 
 /**
  * Analogous to transport::error::operator<<().
@@ -150,7 +150,7 @@ std::istream& operator>>(std::istream& is, Code& val);
  * @return See above.
  */
 std::ostream& operator<<(std::ostream& os, Code val);
-// @todo - `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
+// @todo `@relatesalso Code` makes Doxygen complain; maybe it doesn't work with `enum class`es like Code.
 
 } // namespace ipc::session::error
 

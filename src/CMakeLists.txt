@@ -60,11 +60,13 @@ set(HDRS
     ipc/session/detail/session_fwd.hpp
     ipc/session/detail/session_server_impl.hpp
     ipc/session/detail/session_shared_name.hpp
+    ipc/session/detail/info_collector_dtl.hpp
     ipc/session/error.hpp
     ipc/session/server_session.hpp
     ipc/session/session.hpp
     ipc/session/session_fwd.hpp
     ipc/session/session_server.hpp
+    ipc/session/info_collector.hpp
     ipc/session/sync_io/client_session_adapter.hpp
     ipc/session/sync_io/detail/session_adapter.hpp
     ipc/session/sync_io/server_session_adapter.hpp

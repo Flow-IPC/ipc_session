@@ -177,11 +177,11 @@ namespace ipc::session
  *   - emit vanilla Server_session (#Server_session_obj).
  * @endinternal
  *
- * @tparam S_MQ_TYPE_OR_NONE
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `S_MQ_TYPE_OR_NONE`.
+ * @tparam MQ_TYPE_OR_NONE
+ *         Emitted `Server_session`s shall have the concrete typed based on this value for `MQ_TYPE_OR_NONE`.
  *         See #Server_session_obj.
- * @tparam S_TRANSMIT_NATIVE_HANDLES
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `S_TRANSMIT_NATIVE_HANDLES`.
+ * @tparam TRANSMIT_NATIVE_HANDLES
+ *         Emitted `Server_session`s shall have the concrete typed based on this value for `TRANSMIT_NATIVE_HANDLES`.
  *         See #Server_session_obj.
  * @tparam Mdt_payload
  *         Emitted `Server_session`s shall have the concrete typed based on this value for `Mdt_payload`.
@@ -189,25 +189,25 @@ namespace ipc::session
  *         counterpart) in async_accept().  (Recall that you can use a capnp-`union` internally
  *         for various purposes.)
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 class Session_server :
   private Session_server_impl // Attn!  Emit vanilla `Server_session`s (impl customization point: unused).
-            <Session_server<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
-             Server_session<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>>
+            <Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
+             Server_session<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>>
 {
 private:
   // Types.
 
   /// Short-hand for our base/core impl.
   using Impl = Session_server_impl
-                 <Session_server<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
-                  Server_session<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
+                 <Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
+                  Server_session<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
 
 public:
   // Types.
 
   /// Short-hand for the concrete `Server_session`-like type emitted by async_accept().
-  using Server_session_obj = Server_session<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>;
+  using Server_session_obj = Server_session<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>;
 
   /// Short-hand for Session_mv::Mdt_reader_ptr.
   using Mdt_reader_ptr = typename Impl::Mdt_reader_ptr;
@@ -229,6 +229,13 @@ public:
    * via normal Flow error semantics.  If this occurs, via the non-exception-throwing invocation style,
    * then you must not call async_accept(); or behavior is undefined (assertion may trip).
    *
+   * @warning `srv_app_ref` and `cli_app_master_set_ref` -- and the `Client_app`s to which the latter
+   *          (transitively) refers -- must remain alive throughout `*this` lifetime, as well as that of
+   *          any `Server_session` yielded by async_accept(): their *addresses* are stored and accessed at
+   *          various points later (e.g., when `ostream<<` prints `*this` or a `Server_session`).  This
+   *          is consistent with the intended global-registry lifecycle of Server_app/Client_app/App; see
+   *          the `struct` App doc header.
+   *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
    * @param srv_app_ref
@@ -240,6 +247,8 @@ public:
    *        maintaining this master list in practice.
    * @param err_code
    *        See `flow::Error_code` docs for error reporting semantics.  #Error_code generated:
+   *        error::Code::S_INVALID_ARGUMENT (`srv_app_ref`'s, or a `cli_app_master_set_ref` member's, App::m_name
+   *        violates the documented requirements; typically: contains underscore a/k/a util::Shared_name::S_SEPARATOR);
    *        interprocess-mutex-related errors (probably from boost.interprocess) w/r/t writing the CNS (PID file);
    *        file-related system errors w/r/t writing the CNS (PID file) (see class doc header for background);
    *        errors emitted by transport::Native_socket_stream_acceptor ctor (see that ctor's doc header; but note
@@ -248,7 +257,7 @@ public:
    */
   explicit Session_server(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
                           const Client_app::Master_set& cli_app_master_set_ref,
-                          Error_code* err_code = 0);
+                          Error_code* err_code = nullptr);
 
   /**
    * Destroys this acceptor which will stop listening in the background and cancel any pending
@@ -277,7 +286,7 @@ public:
    * Asynchronously awaits for an opposing Client_session to request session establishment and calls `on_done_func()`,
    * once the connection occurs and log-in exchange completes, or an error occurs, in the former case move-assigning an
    * almost-PEER-state Server_session object to the passed-in Server_session `*target_session`.
-   * `on_done_func(Error_code())` is called on success.  `on_done_func(E)`, where `E` is a non-success
+   * `on_done_func(Error_code{})` is called on success.  `on_done_func(E)`, where `E` is a non-success
    * error code, is called otherwise.  In the latter case `*this` may continue operation, and further `async_accept()`s
    * may succeed.  See class doc header regarding error handling.
    *
@@ -369,7 +378,7 @@ public:
    *
    * ### Client->server metadata exchange ###
    * This is the reverse of the above.  Whatever the opposing client chose to supply as client->server metadata
-   * shall be deserializable at `*mdt_from_cli_or_null` once (and if) `on_done_func(Error_code())` (successful
+   * shall be deserializable at `*mdt_from_cli_or_null` once (and if) `on_done_func(Error_code{})` (successful
    * accept) fires.  If `mdt_from_cli_or_null` is null, the cli->srv metadata shall be ignored.
    *
    * ### Init-channels by server request ###
@@ -393,7 +402,7 @@ public:
    * ### Init-channels by client request ###
    * This is the reverse of the above.  The opposing side shall request 0 or more init-channels-by-client-request;
    * that number of channels shall be opened; and they will be placed into `*init_channels_by_cli_req` which shall
-   * be `->resize()`d accordingly, once (and if) `on_done_func(Error_code())` (successful
+   * be `->resize()`d accordingly, once (and if) `on_done_func(Error_code{})` (successful
    * connect) fires.
    *
    * `init_channels_by_srv_cli` being null is allowed, but only if the opposing server requests 0
@@ -441,6 +450,57 @@ public:
                     Task_err&& on_done_func);
 
   /**
+   * Generated if and only if `S_MQS_ENABLED`, this is the last-specified user override for the max MQ message size
+   * for any subsequently-opened `Channel` in any `Session` spawned from `*this` session-server.
+   *
+   * If zero: we will choose a reasonable value (1) depending on whether we are SHM-enabled and (2) based on the
+   * assumption that the `Channel`s shall be each upgraded-to a SHM-enabled struc::Channel.
+   *   - Re. (1): A `*this` is not SHM-enabled.  However if you're reading this doc header due to being sent here
+   *     from a SHM-enabled Session_server (e.g., shm::classic::Session_server::mq_msg_size_limit()), then of course
+   *     the converse is the case.
+   *   - Re. (2): Basically the interesting situation is, specifically, if `*this` is SHM-enabled.  The assumption (2),
+   *     if it is *in fact* true, will correctly cause little MQ messages to be used internally; big ones are not
+   *     needed, if you're using a SHM-enabled struc::Channel (only little SHM handles are being transmitted).
+   *     However it is entirely plausible you might use a heap-backed struc::Channel with a SHM-enabled `Session`
+   *     (perhaps you want to transmit SHM-handles manually yourself -- maybe to SHM-stored STL structures, say);
+   *     or you have no desire to use struc::Channel *at all* (but, again, you're using SHM-backing for native,
+   *     maybe STL data).  So in that case, the chosen default MQ max message size is too small for whatever payloads
+   *     you've got.  Then a non-zero mq_msg_size_limit() would be useful or required.
+   *
+   * If not zero: we will use this value (possibly somewhat adjusted based on alignment or similar technicalities).
+   *
+   * @return See above.
+   */
+  size_t mq_msg_size_limit() const;
+
+  /**
+   * Generated if and only if `S_MQS_ENABLED`, this sets the value returned by eponymous accessor; that is this
+   * changes the override's value.
+   *
+   * ### Thread safety ###
+   * It is not safe to call it concurrently with `this->mq_msg_size_limit()` accessor or mutator.  It's not safe to call
+   * this when a `this->async_accept()` is outstanding, and either side requests init-channel(s) to opened.
+   * It is not safe to call this when a `*this`-spawned `Session` exists, and either this or the opposing side
+   * (or both) is/are configured to allow passively-opening channels, and the other side might issue an active-open.
+   *
+   * That was an attempt to, in English, formally explain what's not safe.  Perhaps it's easier to understand the
+   * following informal explanation: Anytime a `Session` (spawned from `*this` session-server) must open a channel,
+   * `this->mq_msg_size_limit()` accessor is invoked, and therefore calling the mutator is not safe.  So the question
+   * is basically: when is a channel possibly opened?  Answers: Channels are opened during the connect/accept phase of
+   * a session (a/k/a init-channels); and/or when a side invokes open_channel() (active-open).  Init-channels are
+   * requested via async_accept() and/or `"Client_session::sync_connect()"` args.  open_channel() requests are honored
+   * only if the opposing side is configured with a passive-open handler (`Client_session`: via ctor; `Server_session`:
+   * via `.init_handlers()`).
+   *
+   * If issued before any async_accept(): No problem.  If issued when no `Session` from `*this` is alive, and there's
+   * no async_accept() pending: No problem.  Otherwise: depends.
+   *
+   * @param limit
+   *        See accessor overload; it explains the meaning of this value.  Note zero is a special value.
+   */
+  void mq_msg_size_limit(size_t limit);
+
+  /**
    * Prints string representation to the given `ostream`.
    *
    * @param os
@@ -459,17 +519,17 @@ public:
 
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_SESSION_SERVER \
-  template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+  template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_SESSION_SERVER \
-  Session_server<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>
+  Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>
 
 TEMPLATE_SESSION_SERVER
 CLASS_SESSION_SERVER::Session_server(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref_arg,
                                      const Client_app::Master_set& cli_app_master_set_ref,
                                      Error_code* err_code) :
   Impl(logger_ptr, this, srv_app_ref_arg, cli_app_master_set_ref, err_code,
-       [](const Client_app&) -> Error_code { return Error_code(); }) // Impl customization point: unused.
+       [](const Client_app&) -> Error_code { return {}; }) // Impl customization point: unused.
 {
   // OK then.
 }
@@ -510,6 +570,18 @@ void CLASS_SESSION_SERVER::async_accept(Server_session_obj* target_session,
 {
   Impl::async_accept(target_session, init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
                      std::move(n_init_channels_by_srv_req_func), std::move(mdt_load_func), std::move(on_done_func));
+}
+
+TEMPLATE_SESSION_SERVER
+size_t CLASS_SESSION_SERVER::mq_msg_size_limit() const
+{
+  return Impl::mq_msg_size_limit();
+}
+
+TEMPLATE_SESSION_SERVER
+void CLASS_SESSION_SERVER::mq_msg_size_limit(size_t limit)
+{
+  Impl::mq_msg_size_limit(limit);
 }
 
 TEMPLATE_SESSION_SERVER

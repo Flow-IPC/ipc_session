@@ -26,6 +26,8 @@
 #include "ipc/transport/blob_stream_mq.hpp"
 #include "ipc/transport/error.hpp"
 #include "ipc/util/detail/util.hpp"
+#include <flow/util/util.hpp>
+#include <cstddef>
 #include <boost/interprocess/sync/named_mutex.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/move/make_unique.hpp>
@@ -44,12 +46,12 @@ namespace ipc::session
  *
  * The available customization points are as follows.
  *   - Per-session: `*this` is parameterized on #Server_session_obj.  The vanilla value is `Server_session<...>`;
- *     but to add capabilities sub-class Server_session_impl as explained in its doc header and proceed from
- *     there.  For example see shm::classic::Server_session.  Server_session_impl has its own customization point(s).
+ *     but to add capabilities extend Server_session_mv's behavior as explained in its doc header and proceed from
+ *     there.  For example see shm::classic::Server_session.
  *     - No-customization = specify #Server_session here.
  *   - Cross-session: Additional per-Client_app setup (such as setting up cross-session SHM arena(s) in
  *     on-demand fashion) can be specified by passing in `per_app_setup_func` to ctor.
- *     - No-customization = specify do-nothing function here that returns `Error_code()` always.
+ *     - No-customization = specify do-nothing function here that returns `Error_code{}` always.
  *   - Cross-session: Certain custom code can be caused to run as the last thing in the Server_session_impl dtor,
  *     even after all its state has been destroyed (e.g., all threads have been stopped/joined).
  *     A sub-class may use this customization point by calling sub_class_set_deinit_func().  If not called, the
@@ -61,7 +63,7 @@ namespace ipc::session
  *
  * The thing to understand strategically, as usual, is the thread design.  This is an acceptor, so one might
  * have expected it to be implemented similarly to, say, Native_socket_stream_acceptor -- maintaining a thread W
- * in which to do some/most work; including maintaining a "deficit" queue of oustanding async_accept() requests
+ * in which to do some/most work; including maintaining a "deficit" queue of outstanding async_accept() requests
  * and a "surplus" queue of ready `Server_session`s to emit.  This was an option, but I (ygoldfel) felt that
  * piggy-backing handling of events directly onto the unspecified handler-invoking threads of the internally
  * used objects would produce a much simpler data structure and state machine.  (As a side effect, the behavior
@@ -79,13 +81,12 @@ namespace ipc::session
  *   - Our stored Native_socket_stream_acceptor, where we invoke
  *     transport::Native_socket_stream_acceptor::async_accept(), must emit a PEER-state (connected)
  *     transport::sync_io::Native_socket_stream (the opposing peer object living inside the opposing Client_session).
- *     - Now a Server_session_dtl may be constructed (not yet emitted to user) and then
- *       Server_session_dtl::async_accept_log_in() is invoked.
+ *     - Now a Server_session_mv may be constructed (not yet emitted to user) and then
+ *       Server_session_mv::async_accept_log_in() is invoked.
  *     - Or if the socket-accept failed, then we can emit that to the user already; done.
- *   - That Server_session_dtl::async_accept_log_in() must complete the async log-in exchange against the
+ *   - That Server_session_mv::async_accept_log_in() must complete the async log-in exchange against the
  *     opposing Client_session.
- *     - Now the Server_session_dtl can be converted via pointer `static_cast<>` to `Server_session` and
- *       emitted to the user.
+ *     - Now the Server_session_obj can be emitted to the user.
  *     - Or if the log-in fails at some state, then we can emit that to the user.
  *
  * Nomenclature: We call the `N_s_s_a::async_accept()` handler-invoking thread: Wa.  It is officially an
@@ -114,7 +115,7 @@ namespace ipc::session
  * join itself.  So:
  *   - We maintain State::m_incomplete_sessions storing each such outstanding S.  If dtor runs, then all S will be
  *     auto-destroyed which will automatically invoke the user handler with operation-aborted.
- *   - If an incomplete (oustanding) S successfully completes log-in, we remove it from
+ *   - If an incomplete (outstanding) S successfully completes log-in, we remove it from
  *     Session_server_impl::m_incomplete_sessions and emit it to user via handler.
  *   - If it completes log-in with failure, we remove it from State::m_incomplete_sessions and then:
  *     - hand it off to a mostly-idle separate thread, State::m_incomplete_session_graveyard, which can run S's dtor
@@ -169,7 +170,7 @@ public:
    * reason for failure which dooms that async_accept().
    *
    * ### Rationale for `per_app_setup_func` ###
-   * It is not intended for per-session setup.  #Server_session_dtl_obj should take care of that where it makes
+   * It is not intended for per-session setup.  #Server_session_obj should take care of that where it makes
    * sense -- it does after all represent the individual budding session peer.  However our sub-class
    * (e.g., shm::classic::Session_server) may need to keep track of per-distinct-Client_app resources
    * (e.g., the per-app-scope SHM arena) which must exist before the opposing Client_session-type object
@@ -242,10 +243,25 @@ public:
                     Task_err&& on_done_func);
 
   /**
-   * See Server_session method.
+   * See Session_server method.
+   *
+   * @return See Session_server method.
+   */
+  size_t mq_msg_size_limit() const;
+
+  /**
+   * See Session_server method.
+   *
+   * @param limit
+   *        See Session_server method.
+   */
+  void mq_msg_size_limit(size_t limit);
+
+  /**
+   * See Session_server method.
    *
    * @param os
-   *        See Server_session method.
+   *        See Session_server method.
    */
   void to_ostream(std::ostream* os) const;
 
@@ -313,15 +329,7 @@ private:
   // Types.
 
   /**
-   * Short-hand for concrete Server_session_dtl type, which each async_accept() creates internally, completes
-   * the log-in process upon, and then up-casts to #Server_session_obj to emit to user via move-assignment.
-   * #Server_session_dtl_obj is equal to #Server_session_obj -- it adds no data -- but exposes certain
-   * internally invoked APIs that the user shall not access.
-   */
-  using Server_session_dtl_obj = Server_session_dtl<Server_session_obj>;
-
-  /**
-   * Internally used ref-counted handle to a #Server_session_dtl_obj, suitable for capturing and passing around
+   * Internally used ref-counted handle to a #Server_session_obj, suitable for capturing and passing around
    * lambdas.
    *
    * ### Rationale ###
@@ -332,13 +340,13 @@ private:
    *
    * Secondarily, a `unique_ptr` cannot be captured in a lambda in the first place.
    */
-  using Incomplete_session = boost::shared_ptr<Server_session_dtl_obj>;
+  using Incomplete_session = boost::shared_ptr<Server_session_obj>;
 
   /**
    * `weak_ptr` observer of an #Incomplete_session.  Capturing this, instead of #Incomplete_session itself,
    * allows for the underlying #Incomplete_session to be destroyed while the lambda still exists.
    */
-  using Incomplete_session_observer = boost::weak_ptr<Server_session_dtl_obj>;
+  using Incomplete_session_observer = boost::weak_ptr<Server_session_obj>;
 
   /// Short-hand for set of #Incomplete_session, with fast insertion and removal by key #Incomplete_session itself.
   using Incomplete_sessions = boost::unordered_set<Incomplete_session>;
@@ -364,18 +372,18 @@ private:
     /**
      * The set of all #Incomplete_session objects such that each one comes from a distinct async_accept() request
      * that (1) has accepted a transport::sync_io::Native_socket_stream connection and thus created a
-     * #Server_session_dtl_obj but (2) whose Server_session_dtl::async_accept_log_in() has not yet completed (fired
+     * #Server_session_obj but (2) whose `async_accept_log_in()` has not yet completed (fired
      * handler).
      *
      * Protected by #m_mutex; accessed from thread Wa and threads Ws.  See class doc header impl section for
      * discussion of thread design.
      *
      * ### Impl design ###
-     * Once a Server_session_dtl is created by `*this`, we do `async_accept_log_in()` on it.  We cannot capture that
-     * Server_session_dtl itself into its handler's lambda, as that would create a cycle leak wherein
+     * Once a #Server_session_obj is created by `*this`, we do `async_accept_log_in()` on it.  We cannot capture that
+     * `Server_session_obj` itself into its handler's lambda, as that would create a cycle leak wherein
      * the object can never be destroyed.  (This is typical when maintaining a boost.asio-style I/O object by
      * a `shared_ptr` handle.)  So we capture an #Incomplete_session_observer (`weak_ptr`) thereof; but store
-     * the Server_session_dtl (a/k/a #Incomplete_session) here in `*this`, as of course it must be stored somewhere.
+     * the `Server_session_obj` (a/k/a #Incomplete_session) here in `*this`, as of course it must be stored somewhere.
      * Then if `*this` dtor is invoked before the aforementioned `async_accept_log_in()` handler fires, the handler
      * shall fire with operation-aborted as desired.
      *
@@ -399,12 +407,18 @@ private:
 
     /**
      * Mostly-idle thread that solely destroys objects removed from `m_incomplete_sessions` in the case where a
-     * Server_session_dtl::async_accept_log_in() failed as opposed to succeeded (in which case it is emitted to user).
+     * `async_accept_log_in()` failed as opposed to succeeded (in which case it is emitted to user).
      */
     boost::movelib::unique_ptr<flow::async::Single_thread_task_loop> m_incomplete_session_graveyard;
   }; // struct State
 
   // Data.
+
+  /**
+   * See mq_msg_size_limit(); starts at zero but can be overridden to another value and/or back to zero via
+   * mutator.  Saved as an alignment-friendly multiple.
+   */
+  size_t m_mq_msg_size_limit;
 
   /// See this_session_srv().
   Session_server_obj* const m_this_session_srv;
@@ -442,6 +456,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
 
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
   m_srv_app_ref(srv_app_ref_arg), // Not copied!
+  m_mq_msg_size_limit(0), // Default = let us choose it.
   m_this_session_srv(this_session_srv_arg),
   m_cli_app_master_set_ref(cli_app_master_set_ref), // Ditto!
   m_per_app_setup_func(std::move(per_app_setup_func)),
@@ -455,244 +470,293 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
   using boost::movelib::make_unique;
   using boost::system::system_category;
   using boost::io::ios_all_saver;
+  using std::string;
   using fs::ofstream;
   using Named_sh_mutex = boost::interprocess::named_mutex;
   using Named_sh_mutex_ptr = boost::movelib::unique_ptr<Named_sh_mutex>;
   using Sh_lock_guard = boost::interprocess::scoped_lock<Named_sh_mutex>;
   // using ::errno; // It's a macro apparently.
 
-  // Finish setting up m_state.  See State members in order and deal with the ones needing explicit init.
-  m_state->m_last_cli_namespace = 0;
-  m_state->m_incomplete_session_graveyard
-    = boost::movelib::make_unique<flow::async::Single_thread_task_loop>
-        (get_logger(),
-         /* (Linux) OS thread name will truncate the this-addr snippet to 15-5=10 chars here;
-          * which should actually just fit.  Nothing else seems particularly useful;
-          * like in non-exotic setups our srv-name is pretty much known. */
-         flow::util::ostream_op_string("SSvG-", this));
-
-  /* This is a (as of this writing -- the) *cleanup point* for any MQs previously created on behalf of this
-   * Server_app by previous active processes before us; namely when either a Server_session or opposing Client_session
-   * performs open_channel() (or pre-opens channel(s) during session creation), so the Server_session_impl
-   * creates the actual `Persistent_mq_handle`s via its ctor in create-only mode.  These underlying MQs
-   * are gracefully cleaned up in Blob_stream_mq_send/receiver dtors (see their doc headers).  This cleanup point is a
-   * best-effort attempt to clean up anything that was skipped due to one or more such destructors never getting
-   * to run (due to crash, abort, etc.).  Note that Blob_stream_mq_send/receiver doc headers explicitly explain
-   * the need to worry about this contingency.
-   *
-   * We simply delete everything with the Shared_name prefix used when setting up the MQs
-   * (see Server_session_impl::make_channel_mqs()).  The prefix is everything up-to (not including) the PID
-   * (empty_session.base().srv_namespace() below).  Our own .srv_namespace() is
-   * just about to be determined and is unique across time by definition (internally, it's -- again -- our PID);
-   * so any existing MQs are by definition old.  Note that as of this writing there is at most *one* active
-   * process (instance) of a given Server_app.
-   *
-   * Subtlety (kind of): We worry about such cleanup only if some type of MQ is in fact enabled at compile-time
-   * of *this* application; and we only clean up that MQ type, not the other(s) (as of this writing there are 2,
-   * but that could change conceivably).  If the MQ type is changed (or MQs disabled) after a crash/abort, there
-   * could be a leak.  We could also indiscriminately clean-up all known MQ types here; that would be fine.
-   * @todo Maybe we should.  I don't know.  shm::classic::Session_server ctor's pool cleanup point is only invoked,
-   * if that is the type of Session_server user chose at compile-time, so we are just following that example.
-   * Doing it this way strikes me as cleaner code, and the combination of a crash/abort and changed software
-   * "feels" fairly minor. */
-  if constexpr(Server_session_dtl_obj::Session_base_obj::S_MQS_ENABLED)
-  {
-    using transport::Blob_stream_mq_base;
-    using Mq = typename Server_session_dtl_obj::Session_base_obj::Persistent_mq_handle_from_cfg;
-
-    util::remove_each_persistent_with_name_prefix<Blob_stream_mq_base<Mq>>
-      (get_logger(),
-       build_conventional_shared_name_prefix(Mq::S_RESOURCE_TYPE_ID,
-                                             Shared_name::ct(m_srv_app_ref.m_name)));
-  }
-
-  /* We want to write to CNS (PID file) just below, but what is its location, and the name of its associated
-   * inter-process mutex, and for that matter the contents (formally, the Current Namespace; really the PID)?
-   * Well, this is slightly cheesy, arguably, but any Server_session we produce will need all those values,
-   * and can compute them by itself, and they'll always be the same in this process (app instance), so let's
-   * just make this short-lived dummy Server_session_dtl and get the stuff out of there.  Code reuse = pretty good. */
-  const Server_session_dtl_obj empty_session(nullptr, m_srv_app_ref, Native_socket_stream());
-
   Error_code our_err_code;
+  Server_session_obj empty_session_public;
+  const typename Server_session_dtl<Server_session_obj>::Session_base_obj* empty_session_base = {};
 
-  /* Owner/mode discussion:
-   * ipc::session operates in a certain model (design doc is elsewhere/outside our scope here to fully justify)
-   * that requires, for security/safety:
-   *   - Owner has the specific UID:GID registered under Server_app.  If we are who we are supposed to be,
-   *     this will occur automatically as we create a resource.  Namely we have two relevant resources in here:
-   *     - CNS (PID) file.  Some reasons this could fail: if file already existed
-   *       *and* was created by someone else; if we have the proper UID but are also in some other group or something;
-   *       and lastly Server_app misconfiguration.  Mitigation: none.  For one of those we could do an owner-change
-   *       call to change the group, but for now let's say it's overkill, and actually doing so might hide
-   *       a problem in the environment: let's not even risk that stuff.
-   *     - Associated shared mutex (in Linux apparently a semaphore thingie).  This is an interesting situation;
-   *       it is not mentioned in the aforementioned design in detail -- too much of an impl detail for that --
-   *       so let's consider it.  Should the Server_app UID:GID apply to it too?  Actually not quite: the way we use it,
-   *       it's a symmetrically shared resource (read/write for both us and client), but more to the point
-   *       the *client* is *allowed* to create it (hence OPEN_OR_CREATE both here and in Client_session_impl): it's
-   *       accessed in order to get one's turn at accessing the CNS file, and to be "accessed" it must be created
-   *       as needed (and then it'll keep existing until reboot).  So actually the *GID* should be correct
-   *       according to Server_app, but the UID can be, in fact, Server_app's -- or Client_app's, or *another*
-   *       Client_app's entirely, or any number of them!
-   *       - So should we check something about the mutex's UID/GID then?
-   *         - It would probably be not bad to check for the GID.  It is even conceivable to check the UID as that
-   *           of one of the allowed `Client_app`s.
-   *         - I (ygoldfel) feel it's overkill.  I could be wrong, but it just feels insane: the mutex is only a way
-   *           to access CNS file in orderly fashion without concurrency issues.  Either it works, or it doesn't
-   *           work; trying to sanity-check that the right UID/GID owns it is going beyond the spirit of the design:
-   *           to make ascertain that "certain model" of trust/safety/security.  We already do that with CNS itself;
-   *           we don't need to be paranoid about the-thing-that-is-needed-to-use-CNS.
-   *   - The mode is as dictated by Server_app::m_permissions_level_for_client_apps.  This we can and should
-   *     ensure via a mode-set/change call.  There are subtleties about how to do that, but they're discussed
-   *     near the call sites below.  As for now: We have two relevant resources in here, again:
-   *     - CNS (PID) file.  Yes, indeed, we set its permissions below.
-   *     - Associated shared mutex.  See above.  So, actually, we sets its permissions below too.  That is actually
-   *       (though unmentioned in the design) a pretty good idea for the "certain model" in the design:
-   *       If, say, it's set to unrestricted access, then any user could just acquire the lock... and block IPC
-   *       from proceeding, ever, for anyone else wishing to work with that Server_app.  So, certainly,
-   *       it should be locked down to the same extent as CNS itself.  What's interesting about that is that
-   *       a client, too, can create it (again, see above) -- and thus needs to set some kind of sensible
-   *       permissions on creation (if applicable).  And so it does... by checking Server_app [sic] as well and
-   *       indeed setting that level of permissions.  Does it make sense?  Yes.  Here are the scenarios specifically:
-   *       - If the access level in Server_app is set to NO_ACCESS: Well then no one can access it.  LoL.  Next.
-   *       - If UNRESTRICTED: Well then it's meant to be world-accessible!  Yay!  LoL again!  Next.
-   *       - If USER_ACCESS: Logically, for CNS to be accessible, if only the server UID is allowed access, then
-   *         for it to interoperate with any clients, the clients must also be of that UID.  So the client
-   *         setting the mode to *its* UID should accomplish the same as if server had done it.
-   *       - If GROUP_ACCESS (the approach mandated by the design, though we don't assume it, hence the
-   *         Server_app configuration): Same logic but applied to GID.
-   *       Anyway, here on the server it's simple; we should set-mode similarly to how we do for CNS.
-   *       The bulk of the above long explanation is why the client does it.  The comment in Client_session_impl
-   *       points back to right here to avoid duplication.
-   *
-   * So let's do that stuff below. */
-
-  /* Ensure our effective user is as configured in Server_app.  We do check this value on the CNS (PID) file
-   * anyway; but this is still a good check because:
-   *   - We might not be creating the file ourselves (first guy to get to it since boot is).
-   *   - It eliminates the need (well, strong word but anyway) to keep checking that for various other
-   *     resources created down the line, whether it's MQs or SHM pools or whatever else.
-   *     Doing that is possible but:
-   *     - annoying: it requires either a descriptor for an ::fstat() or a rather-unportable file-system-path for
-   *       anything but actual files;
-   *     - super-annoying: it requires deep-inside -- possibly even eventually user-supplied -- modules like
-   *       the SHM-jemalloc module to be aware of the desire to even do this in the first place on every shared
-   *       resource.
-   *
-   * The idea is: checking it here up-front, plus checking it on the CNS (PID) file (from which all IPC naming
-   * and thus trust, per design, flows), is a nice way to take care of it ahead of all that.  It's not perfect:
-   * the effective UID:GID can be changed at runtime.  We don't need to be perfect though: the whole
-   * safety/security project, here, is not meant to be some kind of cryptographically powerful guarantee. */
-  const auto own_creds = Process_credentials::own_process_credentials();
-  if ((own_creds.user_id() != m_srv_app_ref.m_user_id) || (own_creds.group_id() != m_srv_app_ref.m_group_id))
+  /* Validate the App names per the contract (see App::m_name doc header): they get embedded into
+   * `Shared_name`s per the conventional naming scheme, and a name containing S_SEPARATOR corrupts that
+   * scheme -- often silently, since much consuming logic is prefix-based and tolerates it, while
+   * decompose-based logic (e.g., the SHM-jemalloc crash-cleanup sweeps) quietly misbehaves.  So fail
+   * loudly instead, right here, where the entire universe of App names for this Flow-IPC split is in hand. */
   {
-    FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Creation underway.  However, just before writing "
-                     "CNS (Current Namespace Store), a/k/a PID file, we determined that "
-                     "the `user` aspect of our effective credentials [" << own_creds << "] do not match "
-                     "the hard-configured value passed to this ctor: "
-                     "[" << m_srv_app_ref.m_user_id << ':' << m_srv_app_ref.m_group_id << "].  "
-                     "We cannot proceed, as this would violate the security/safety model of ipc::session.  "
-                     "Emitting error.");
-    our_err_code = error::Code::S_RESOURCE_OWNER_UNEXPECTED;
-  }
-  else // if (own_creds match m_srv_app_ref.m_{user|group}_id)
-  {
-    const auto mutex_name = empty_session.base().cur_ns_store_mutex_absolute_name();
-    const auto mutex_perms = util::shared_resource_permissions(m_srv_app_ref.m_permissions_level_for_client_apps);
-    const auto cns_path = empty_session.base().cur_ns_store_absolute_path();
-    const auto cns_perms = util::PRODUCER_CONSUMER_RESOURCE_PERMISSIONS_LVL_MAP
-                             [size_t(m_srv_app_ref.m_permissions_level_for_client_apps)];
-
-    const auto logger_ptr = get_logger();
-    if (logger_ptr && logger_ptr->should_log(Sev::S_INFO, get_log_component()))
+    const auto name_bad = [](const string& name) -> bool
     {
-      ios_all_saver saver{*(logger_ptr->this_thread_ostream())}; // Revert std::oct/etc. soon.
-      FLOW_LOG_INFO_WITHOUT_CHECKING
-        ("Session acceptor [" << *this << "]: Created.  Writing CNS (Current Namespace Store), a/k/a PID "
-         "file [" << cns_path << "] (perms "
-         "[" << std::setfill('0')
-             << std::setw(4) // Subtlety: This resets right away after the perms are output...
-             << std::oct << cns_perms.get_permissions() << "], "
-         "shared-mutex name [" << mutex_name << "], shared-mutex perms "
-         "[" << std::setw(4) // ...hence gotta do this again.
-             << mutex_perms.get_permissions() << "]); "
-         "then listening for incoming master socket stream "
-         "connects (through Native_socket_stream_acceptor that was just cted) to address "
-         "based partially on the namespace (PID) written to that file.");
+      return name.empty() || (name.find(Shared_name::S_SEPARATOR) != string::npos);
+    };
+    // Attn: An empty name *is* one of the bad-name forms; so "" cannot double as a none-found sentinel.
+    bool found_bad_name = name_bad(m_srv_app_ref.m_name);
+    string bad_name = found_bad_name ? m_srv_app_ref.m_name : string{};
+    if (!found_bad_name)
+    {
+      for (const auto& cli_app_name_and_obj : cli_app_master_set_ref)
+      {
+        if (name_bad(cli_app_name_and_obj.first))
+        {
+          found_bad_name = true;
+          bad_name = cli_app_name_and_obj.first;
+          break;
+        }
+      }
+    }
+    if (found_bad_name)
+    {
+      FLOW_LOG_WARNING("Session-server [" << *this << "]: An App name -- [" << bad_name << "] -- is "
+                       "empty or contains the Shared_name separator [" << Shared_name::S_SEPARATOR << "]; "
+                       "this violates the App::m_name contract and would corrupt the conventional "
+                       "shared-resource naming scheme.  Emitting error.");
+      our_err_code = error::Code::S_INVALID_ARGUMENT;
+    }
+  }
+
+  if (!our_err_code)
+  {
+    // Finish setting up m_state.  See State members in order and deal with the ones needing explicit init.
+    m_state->m_last_cli_namespace = 0;
+    m_state->m_incomplete_session_graveyard
+      = boost::movelib::make_unique<flow::async::Single_thread_task_loop>
+          (get_logger(),
+           /* (Linux) OS thread name will truncate the this-addr snippet to 15-5=10 chars here;
+            * which should actually just fit.  Nothing else seems particularly useful;
+            * like in non-exotic setups our srv-name is pretty much known. */
+           flow::util::ostream_op_string("SSvG-", this));
+
+    /* This is a (as of this writing -- the) *cleanup point* for any MQs previously created on behalf of this
+     * Server_app by previous active processes before us; namely when either a Server_session or opposing Client_session
+     * performs open_channel() (or pre-opens channel(s) during session creation), so the Server_session_impl
+     * creates the actual `Persistent_mq_handle`s via its ctor in create-only mode.  These underlying MQs
+     * are gracefully cleaned up in Blob_stream_mq_send/receiver dtors (see their doc headers).  This cleanup point is a
+     * best-effort attempt to clean up anything that was skipped due to one or more such destructors never getting
+     * to run (due to crash, abort, etc.).  Note that Blob_stream_mq_send/receiver doc headers explicitly explain
+     * the need to worry about this contingency.
+     *
+     * We simply delete everything with the Shared_name prefix used when setting up the MQs
+     * (see Server_session_impl::make_channel_mqs()).  The prefix is everything up-to (not including) the PID
+     * (empty_session_base->srv_namespace() below).  Our own .srv_namespace() is
+     * just about to be determined and is unique across time by definition (internally, it's -- again -- our PID);
+     * so any existing MQs are by definition old.  Note that as of this writing there is at most *one* active
+     * process (instance) of a given Server_app.
+     *
+     * Subtlety (kind of): We worry about such cleanup only if some type of MQ is in fact enabled at compile-time
+     * of *this* application; and we only clean up that MQ type, not the other(s) (as of this writing there are 2,
+     * but that could change conceivably).  If the MQ type is changed (or MQs disabled) after a crash/abort, there
+     * could be a leak.  We could also indiscriminately clean-up all known MQ types here; that would be fine.
+     * @todo Maybe we should.  I don't know.  shm::classic::Session_server ctor's pool cleanup point is only invoked,
+     * if that is the type of Session_server user chose at compile-time, so we are just following that example.
+     * Doing it this way strikes me as cleaner code, and the combination of a crash/abort and changed software
+     * "feels" fairly minor.
+     *
+     * A note on stats: A stat surface for this cleanup point (and its analogs in the SHM-enabled `Session_server`
+     * variants) has been considered and deliberately omitted: such events are rare by construction (crash
+     * aftermath) and fully log-observable (per-item logging and counts inside `remove_each_persistent_*()`).
+     * Longer discussion: see similar note in shm::arena_lend::jemalloc::Session_server::cleanup(). */
+    if constexpr(Server_session_obj::S_MQS_ENABLED)
+    {
+      using transport::Blob_stream_mq_base;
+      using Mq = typename Server_session_dtl<Server_session_obj>::Session_base_obj::Persistent_mq_handle_from_cfg;
+
+      util::remove_each_persistent_with_name_prefix<Blob_stream_mq_base<Mq>>
+        (get_logger(),
+         build_conventional_shared_name_prefix(Mq::S_RESOURCE_TYPE_ID,
+                                               Shared_name::ct(m_srv_app_ref.m_name)));
     }
 
-    /* See Client_session_impl where it, too, creates this sh_mutex for notes equally applicable here.
-     * It reads the file we are about to write and locks the same inter-process mutex accordingly. */
-    Named_sh_mutex_ptr sh_mutex;
-    util::op_with_possible_bipc_exception(get_logger(), &our_err_code, error::Code::S_MUTEX_BIPC_MISC_LIBRARY_ERROR,
-                                          "Server_session_impl::ctor:named-mutex-open-or-create", [&]()
+    /* We want to write to CNS (PID file) just below, but what is its location, and the name of its associated
+     * inter-process mutex, and for that matter the contents (formally, the Current Namespace; really the PID)?
+     * Well, this is slightly cheesy, arguably, but any Server_session we produce will need all those values,
+     * and can compute them by itself, and they'll always be the same in this process (app instance), so let's
+     * just make this short-lived dummy Server_session_obj and get the stuff out of there.  Code reuse = pretty good. */
+    empty_session_public
+      = Server_session_dtl<Server_session_obj>::ct_base(nullptr, m_srv_app_ref, Native_socket_stream{});
+    empty_session_base // Use privileged-API wrapper to get at protected .base().
+      = &(Server_session_dtl<Server_session_obj>{ empty_session_public }.base());
+
+    /* Owner/mode discussion:
+     * ipc::session operates in a certain model (design doc is elsewhere/outside our scope here to fully justify)
+     * that requires, for security/safety:
+     *   - Owner has the specific UID:GID registered under Server_app.  If we are who we are supposed to be,
+     *     this will occur automatically as we create a resource.  Namely we have two relevant resources in here:
+     *     - CNS (PID) file.  Some reasons this could fail: if file already existed
+     *       *and* was created by someone else; if we have the proper UID but are also in some other group or something;
+     *       and lastly Server_app misconfiguration.  Mitigation: none.  For one of those we could do an owner-change
+     *       call to change the group, but for now let's say it's overkill, and actually doing so might hide
+     *       a problem in the environment: let's not even risk that stuff.
+     *     - Associated shared mutex (in Linux apparently a semaphore thingie).  This is an interesting situation;
+     *       it is not mentioned in the aforementioned design in detail -- too much of an impl detail for that --
+     *       so let's consider it.  Should the Server_app UID:GID apply to it too?  Actually not quite: the way we use it,
+     *       it's a symmetrically shared resource (read/write for both us and client), but more to the point
+     *       the *client* is *allowed* to create it (hence OPEN_OR_CREATE both here and in Client_session_impl): it's
+     *       accessed in order to get one's turn at accessing the CNS file, and to be "accessed" it must be created
+     *       as needed (and then it'll keep existing until reboot).  So actually the *GID* should be correct
+     *       according to Server_app, but the UID can be, in fact, Server_app's -- or Client_app's, or *another*
+     *       Client_app's entirely, or any number of them!
+     *       - So should we check something about the mutex's UID/GID then?
+     *         - It would probably be not bad to check for the GID.  It is even conceivable to check the UID as that
+     *           of one of the allowed `Client_app`s.
+     *         - I (ygoldfel) feel it's overkill.  I could be wrong, but it just feels insane: the mutex is only a way
+     *           to access CNS file in orderly fashion without concurrency issues.  Either it works, or it doesn't
+     *           work; trying to sanity-check that the right UID/GID owns it is going beyond the spirit of the design:
+     *           to make ascertain that "certain model" of trust/safety/security.  We already do that with CNS itself;
+     *           we don't need to be paranoid about the-thing-that-is-needed-to-use-CNS.
+     *   - The mode is as dictated by Server_app::m_permissions_level_for_client_apps.  This we can and should
+     *     ensure via a mode-set/change call.  There are subtleties about how to do that, but they're discussed
+     *     near the call sites below.  As for now: We have two relevant resources in here, again:
+     *     - CNS (PID) file.  Yes, indeed, we set its permissions below.
+     *     - Associated shared mutex.  See above.  So, actually, we sets its permissions below too.  That is actually
+     *       (though unmentioned in the design) a pretty good idea for the "certain model" in the design:
+     *       If, say, it's set to unrestricted access, then any user could just acquire the lock... and block IPC
+     *       from proceeding, ever, for anyone else wishing to work with that Server_app.  So, certainly,
+     *       it should be locked down to the same extent as CNS itself.  What's interesting about that is that
+     *       a client, too, can create it (again, see above) -- and thus needs to set some kind of sensible
+     *       permissions on creation (if applicable).  And so it does... by checking Server_app [sic] as well and
+     *       indeed setting that level of permissions.  Does it make sense?  Yes.  Here are the scenarios specifically:
+     *       - If the access level in Server_app is set to NO_ACCESS: Well then no one can access it.  LoL.  Next.
+     *       - If UNRESTRICTED: Well then it's meant to be world-accessible!  Yay!  LoL again!  Next.
+     *       - If USER_ACCESS: Logically, for CNS to be accessible, if only the server UID is allowed access, then
+     *         for it to interoperate with any clients, the clients must also be of that UID.  So the client
+     *         setting the mode to *its* UID should accomplish the same as if server had done it.
+     *       - If GROUP_ACCESS (the approach mandated by the design, though we don't assume it, hence the
+     *         Server_app configuration): Same logic but applied to GID.
+     *       Anyway, here on the server it's simple; we should set-mode similarly to how we do for CNS.
+     *       The bulk of the above long explanation is why the client does it.  The comment in Client_session_impl
+     *       points back to right here to avoid duplication.
+     *
+     * So let's do that stuff below. */
+
+    /* Ensure our effective user is as configured in Server_app.  We do check this value on the CNS (PID) file
+     * anyway; but this is still a good check because:
+     *   - We might not be creating the file ourselves (first guy to get to it since boot is).
+     *   - It eliminates the need (well, strong word but anyway) to keep checking that for various other
+     *     resources created down the line, whether it's MQs or SHM pools or whatever else.
+     *     Doing that is possible but:
+     *     - annoying: it requires either a descriptor for an ::fstat() or a rather-unportable file-system-path for
+     *       anything but actual files;
+     *     - super-annoying: it requires deep-inside -- possibly even eventually user-supplied -- modules like
+     *       the SHM-jemalloc module to be aware of the desire to even do this in the first place on every shared
+     *       resource.
+     *
+     * The idea is: checking it here up-front, plus checking it on the CNS (PID) file (from which all IPC naming
+     * and thus trust, per design, flows), is a nice way to take care of it ahead of all that.  It's not perfect:
+     * the effective UID:GID can be changed at runtime.  We don't need to be perfect though: the whole
+     * safety/security project, here, is not meant to be some kind of cryptographically powerful guarantee. */
+    const auto own_creds = Process_credentials::own_process_credentials();
+    if ((own_creds.user_id() != m_srv_app_ref.m_user_id) || (own_creds.group_id() != m_srv_app_ref.m_group_id))
     {
-      sh_mutex = make_unique<Named_sh_mutex>(util::OPEN_OR_CREATE, mutex_name.native_str(), mutex_perms);
-      /* Set the permissions as discussed in long comment above. --^
-       * Bonus: All bipc OPEN_OR_CREATE guys take care to ensure permissions are set regardless of umask,
-       * so no need for us to set_resource_permissions() here.
-       *
-       * As for ensuring ownership... skipping as discussed in long comment above. */
-    });
-
-    if (!our_err_code)
+      FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Creation underway.  However, just before writing "
+                       "CNS (Current Namespace Store), a/k/a PID file, we determined that "
+                       "the `user` aspect of our effective credentials [" << own_creds << "] do not match "
+                       "the hard-configured value passed to this ctor: "
+                       "[" << m_srv_app_ref.m_user_id << ':' << m_srv_app_ref.m_group_id << "].  "
+                       "We cannot proceed, as this would violate the security/safety model of ipc::session.  "
+                       "Emitting error.");
+      our_err_code = error::Code::S_RESOURCE_OWNER_UNEXPECTED;
+    }
+    else // if (own_creds match m_srv_app_ref.m_{user|group}_id)
     {
-      Sh_lock_guard sh_lock(*sh_mutex);
+      const auto mutex_name = empty_session_base->cur_ns_store_mutex_absolute_name();
+      const auto mutex_perms = util::shared_resource_permissions(m_srv_app_ref.m_permissions_level_for_client_apps);
+      const auto cns_path = empty_session_base->cur_ns_store_absolute_path();
+      const auto cns_perms = util::PRODUCER_CONSUMER_RESOURCE_PERMISSIONS_LVL_MAP
+                               [size_t(m_srv_app_ref.m_permissions_level_for_client_apps)];
 
-      /* Only set permissions if we in fact create CNS (PID) file.  Since we use mutex and trust mutex's other
-       * users, we can atomically-enough check whether we create it by pre-checking its existence.  To pre-check
-       * its existence use fs::exists().  fs::exists() can yield an error, but we intentionally eat any error
-       * and treat it as-if file does not exist.  Whatever issue it was, if any, should get detected via ofstream
-       * opening.  Hence, if there's an error, we pre-assume we_created_cns==true, and let the chips where they
-       * may subsequently.  (Note this is all a low-probability eventuality.) */
-      Error_code dummy; // Can't just use fs::exists(cns_path), as it might throw an exception (not what we want).
-      const bool we_created_cns = !fs::exists(cns_path, dummy);
-      ofstream cns_file(cns_path);
-      // Make it exist immediately (for the following check).  @todo Might be unnecessary.  At least it's harmless.
-      cns_file.flush();
-
-      /* Ensure owner is as configured.  (Is this redundant, given that we checked UID:GID above?  Yes and no:
-       * yes, if we created it; no, if we hadn't.  So why not only check if (!we_created_cns)?  Answer: paranoia,
-       * sanity checking.  We're not gonna do this check down the line for this session (per earlier-explained
-       * decision), so might as well just sanity-check.
-       *
-       * Ideally we'd:
-       *   - Pass in an fstream-or-FD-or-similar (we've opened the file after all, so there is one), not a name.
-       *   - Use something in C++/C standard library or Boost, not an OS call.
-       *
-       * It's nice to want things.  On the FD front we're somewhat screwed; there is a gcc-oriented hack to get the FD,
-       * but it involves protected access and non-standard stuff.  Hence we must work from the `path` cns_path.
-       * We've created it, so it really should work, even if it's a little slower or what-not.  As for using
-       * a nice library... pass the buck: */
-      ensure_resource_owner_is_app(get_logger(), cns_path, m_srv_app_ref, &our_err_code);
-      if ((!our_err_code) && we_created_cns)
+      const auto logger_ptr = get_logger();
+      if (logger_ptr && logger_ptr->should_log(Sev::S_INFO, get_log_component()))
       {
-        /* The owner check passed; and we just created it.  (At this stage fs::exists() having failed somehow is
-         * more-or-less impossible: ensure_resource_owner_is_app() would've failed if so.)  So:
-         * Set mode.  Again, no great way to get an FD, nor to use the fstream itself.  So just: */
-        util::set_resource_permissions(get_logger(), cns_path, cns_perms, &our_err_code);
-        // If it failed, it logged.
-      } // if (we_created_cns && (!(our_err_code [from set_resource_permissions()])))
+        ios_all_saver saver{*(logger_ptr->this_thread_ostream())}; // Revert std::oct/etc. soon.
+        FLOW_LOG_INFO_WITHOUT_CHECKING
+          ("Session acceptor [" << *this << "]: Created.  Writing CNS (Current Namespace Store), a/k/a PID "
+           "file [" << cns_path << "] (perms "
+           "[" << std::setfill('0')
+               << std::setw(4) // Subtlety: This resets right away after the perms are output...
+               << std::oct << cns_perms.get_permissions() << "], "
+           "shared-mutex name [" << mutex_name << "], shared-mutex perms "
+           "[" << std::setw(4) // ...hence gotta do this again.
+               << mutex_perms.get_permissions() << "]); "
+           "then listening for incoming master socket stream "
+           "connects (through Native_socket_stream_acceptor that was just cted) to address "
+           "based partially on the namespace (PID) written to that file.");
+      }
+
+      /* See Client_session_impl where it, too, creates this sh_mutex for notes equally applicable here.
+       * It reads the file we are about to write and locks the same inter-process mutex accordingly. */
+      Named_sh_mutex_ptr sh_mutex;
+      util::op_with_possible_bipc_exception(get_logger(), &our_err_code, error::Code::S_MUTEX_BIPC_MISC_LIBRARY_ERROR,
+                                            "Server_session_impl::ctor:named-mutex-open-or-create", [&]()
+      {
+        sh_mutex = make_unique<Named_sh_mutex>(util::OPEN_OR_CREATE, mutex_name.native_str(), mutex_perms);
+        /* Set the permissions as discussed in long comment above. --^
+         * Bonus: All bipc OPEN_OR_CREATE guys take care to ensure permissions are set regardless of umask,
+         * so no need for us to set_resource_permissions() here.
+         *
+         * As for ensuring ownership... skipping as discussed in long comment above. */
+      });
 
       if (!our_err_code)
       {
-        cns_file << empty_session.base().srv_namespace().str() << '\n';
+        Sh_lock_guard sh_lock{*sh_mutex};
 
-        if (!cns_file.good())
+        /* Only set permissions if we in fact create CNS (PID) file.  Since we use mutex and trust mutex's other
+         * users, we can atomically-enough check whether we create it by pre-checking its existence.  To pre-check
+         * its existence use fs::exists().  fs::exists() can yield an error, but we intentionally eat any error
+         * and treat it as-if file does not exist.  Whatever issue it was, if any, should get detected via ofstream
+         * opening.  Hence, if there's an error, we pre-assume we_created_cns==true, and let the chips where they
+         * may subsequently.  (Note this is all a low-probability eventuality.) */
+        Error_code dummy; // Can't just use fs::exists(cns_path), as it might throw an exception (not what we want).
+        const bool we_created_cns = !fs::exists(cns_path, dummy);
+        ofstream cns_file{cns_path};
+        // Make it exist immediately (for the following check).  @todo Might be unnecessary.  At least it's harmless.
+        cns_file.flush();
+
+        /* Ensure owner is as configured.  (Is this redundant, given that we checked UID:GID above?  Yes and no:
+         * yes, if we created it; no, if we hadn't.  So why not only check if (!we_created_cns)?  Answer: paranoia,
+         * sanity checking.  We're not gonna do this check down the line for this session (per earlier-explained
+         * decision), so might as well just sanity-check.
+         *
+         * Ideally we'd:
+         *   - Pass in an fstream-or-FD-or-similar (we've opened the file after all, so there is one), not a name.
+         *   - Use something in C++/C standard library or Boost, not an OS call.
+         *
+         * It's nice to want things.  On the FD front we're somewhat screwed; there is a gcc-oriented hack to get the FD,
+         * but it involves protected access and non-standard stuff.  Hence we must work from the `path` cns_path.
+         * We've created it, so it really should work, even if it's a little slower or what-not.  As for using
+         * a nice library... pass the buck: */
+        ensure_resource_owner_is_app(get_logger(), cns_path, m_srv_app_ref, &our_err_code);
+        if ((!our_err_code) && we_created_cns)
         {
-          const auto sys_err_code = our_err_code = Error_code(errno, system_category());
-          FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Could not open or write CNS (PID) file "
-                           "file [" << cns_path << "]; system error details follow.");
-          FLOW_ERROR_SYS_ERROR_LOG_WARNING(); // Log based on sys_err_code.
-        }
-        // Close file, unlock mutex.
-      } // if (!our_err_code) (from ensure_resource_owner_is_app(), or from set_resource_permissions())
-      // else { It logged. }
-    } // if (!our_err_code) (mutex creation)
-    // else { It logged. }
+          /* The owner check passed; and we just created it.  (At this stage fs::exists() having failed somehow is
+           * more-or-less impossible: ensure_resource_owner_is_app() would've failed if so.)  So:
+           * Set mode.  Again, no great way to get an FD, nor to use the fstream itself.  So just: */
+          util::set_resource_permissions(get_logger(), cns_path, cns_perms, &our_err_code);
+          // If it failed, it logged.
+        } // if (we_created_cns && (!(our_err_code [from set_resource_permissions()])))
 
-    sh_mutex.reset(); // Again, see note in Client_session_impl which does the same.
-  } // else if (own_creds match m_srv_app_ref.m_{user|group}_id) // Otherwise our_err_code is truthy.
+        if (!our_err_code)
+        {
+          cns_file << empty_session_base->srv_namespace().str() << '\n';
+
+          if (!cns_file.good())
+          {
+            const auto sys_err_code = our_err_code = {errno, system_category()};
+            FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Could not open or write CNS (PID) file "
+                             "file [" << cns_path << "]; system error details follow.");
+            FLOW_ERROR_SYS_ERROR_LOG_WARNING(); // Log based on sys_err_code.
+          }
+          // Close file, unlock mutex.
+        } // if (!our_err_code) (from ensure_resource_owner_is_app(), or from set_resource_permissions())
+        // else { It logged. }
+      } // if (!our_err_code) (mutex creation)
+      // else { It logged. }
+
+      sh_mutex.reset(); // Again, see note in Client_session_impl which does the same.
+    } // else if (own_creds match m_srv_app_ref.m_{user|group}_id) // Otherwise our_err_code is truthy.
+  } // if (!our_err_code) (App-name check)
 
   if (our_err_code)
   {
@@ -702,7 +766,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
       return;
     }
     // else
-    throw Runtime_error(our_err_code, FLOW_UTIL_WHERE_AM_I_STR());
+    throw Runtime_error{our_err_code, FLOW_UTIL_WHERE_AM_I_STR()};
   }
   /* Got here: CNS (PID file) written fine.  Now we can listen on the socket stream acceptor derived off that value:
    * clients will read that file and thus know to connect to that. */
@@ -711,7 +775,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
   m_state->m_master_sock_acceptor
     = make_unique<transport::Native_socket_stream_acceptor>
         (get_logger(),
-         empty_session.base().session_master_socket_stream_acceptor_absolute_name(),
+         empty_session_base->session_master_socket_stream_acceptor_absolute_name(),
          err_code);
 
   // See class doc header.  Start this very-idle thread for a bit of corner case work.
@@ -734,7 +798,7 @@ CLASS_SESSION_SERVER_IMPL::~Session_server_impl()
    * Namely:
    *   - m_master_sock_acceptor dtor runs: fires our handler with its operation-aborted code; we translate it
    *     into the expected operation-aborted code; cool.  This occurs with any such pending handlers.
-   *   - m_incomplete_sessions dtor runs: Each Server_session_dtl_obj dtor runs: Any pending async_accept_log_in()
+   *   - m_incomplete_sessions dtor runs: Each Server_session_obj dtor runs: Any pending async_accept_log_in()
    *     emits the expected operation-aborted code; cool.
    *
    * Additionally via sub_class_set_deinit_func() we allow for certain final de-init code to be executed, once
@@ -777,7 +841,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
    * does not interact with other Ws.  Wa means they invoked us directly from our own completion handler
    * again, albeit only on error would that be from Wa; anyway Native_socket_stream_acceptor allows it. */
 
-  Task_asio_err on_done_func(std::move(on_done_handler));
+  Task_asio_err on_done_func{std::move(on_done_handler)};
   auto sock_stm = make_shared<transport::sync_io::Native_socket_stream>(); // Empty target socket stream.
   const auto sock_stm_raw = sock_stm.get();
 
@@ -830,25 +894,26 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
                   "1.  Now we create the server session and have it undergo async-login; if that succeeds we will "
                   "finally emit the ready-to-go session to user via handler.");
 
-    Incomplete_session incomplete_session
-      = make_shared<Server_session_dtl_obj>(get_logger(),
-                                            m_srv_app_ref, // Not copied!
-                                            // Gobble up the stream obj into the channel in session:
-                                            std::move(*sock_stm));
+    Incomplete_session incomplete_session // Use privileged-API wrapper to construct Server_session_obj via priv ctor.
+      = make_shared<Server_session_obj>(Server_session_dtl<Server_session_obj>::ct_base
+                                          (get_logger(),
+                                           m_srv_app_ref, // Not copied!
+                                           // Gobble up the stream obj into the channel in session:
+                                           std::move(*sock_stm)));
     /* It's important that we save this in *this, so that if *this is destroyed, then *incomplete_session is
      * destroyed, so that it triggers the handler below with operation-aborted, so that we pass that on to
      * the user handler as promised.  However it is therefore essential that we don't also capture
      * incomplete_session (the shared_ptr!) in our handler lambda but rather only the observer (weak_ptr) of it!
      * Otherwise we create a cycle and a memory leak. */
     {
-      Lock_guard incomplete_sessions_lock(m_state->m_mutex);
+      Lock_guard incomplete_sessions_lock{m_state->m_mutex};
       m_state->m_incomplete_sessions.insert(incomplete_session);
     }
 
-    // This little hook is required by Server_session_dtl::async_accept_log_in() for Client_app* lookup and related.
+    // This little hook is required by Server_session_mv::async_accept_log_in() for Client_app* lookup and related.
     auto cli_app_lookup_func = [this](String_view cli_app_name) -> const Client_app*
     {
-      const auto cli_it = m_cli_app_master_set_ref.find(string(cli_app_name));
+      const auto cli_it = m_cli_app_master_set_ref.find(string{cli_app_name});
       return (cli_it == m_cli_app_master_set_ref.end()) ? static_cast<const Client_app*>(0) : &cli_it->second;
     };
 
@@ -862,7 +927,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
     /* Lastly, we are to execute this upon knowing the Client_app and before the log-in response it sent to
      * opposing Client_session. */
     auto pre_rsp_setup_func = [this,
-                               incomplete_session_observer = Incomplete_session_observer(incomplete_session)]
+                               incomplete_session_observer = Incomplete_session_observer{incomplete_session}]
                                 () -> Error_code
     {
       // We are in thread Ws (unspecified; really Server_session worker thread).
@@ -870,11 +935,11 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
       // (Could have captured incomplete_session itself, but I'd rather assert() than leak.)
       auto incomplete_session = incomplete_session_observer.lock();
       assert(incomplete_session
-             && "The Server_session_dtl_obj cannot be dead (dtor ran), if it's invoking its async handlers OK "
+             && "The Server_session_obj cannot be dead (dtor ran), if it's invoking its async handlers OK "
                   "(and thus calling us in its async_accept_log_in() success path.");
       // If it's not dead, we're not dead either (as us dying is the only reason incomplete_session would die).
 
-      const auto cli_app_ptr = incomplete_session->base().cli_app_ptr();
+      const auto cli_app_ptr = Server_session_dtl<Server_session_obj>{ *incomplete_session }.base().cli_app_ptr();
       assert(cli_app_ptr && "async_accept_log_in() contract is to call pre_rsp_setup_func() once all "
                               "the basic elements of Session_base are known (including Client_app&).");
 
@@ -882,11 +947,11 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
     }; // auto pre_rsp_setup_func =
 
     /* @todo It occurs to me (ygoldfel) now that I look at it: all these args -- even on_done_func --
-     * could instead be passed into Server_session_dtl ctor; that guy could save them into m_* (as of this writing
+     * could instead be passed into Server_session_obj ctor; that guy could save them into m_* (as of this writing
      * it passes them around via lambdas).  After all, as of now, async_accept_log_in() is non-retriable.
      * Pros: much less lambda-capture boiler-plate in there.
      * Cons: (1) added state can leak (they'd need to worry about maybe clearing that stuff on entry to almost-PEER
-     * state, and possibly on failure); (2) arguably less maintainable (maybe Server_session_dtl may want to
+     * state, and possibly on failure); (2) arguably less maintainable (maybe Server_session_obj may want to
      * make async_accept() re-triable a-la Client_session_impl::async_connect()?).
      *
      * I, personally, have a big bias against non-const m_* state (where it can be avoided reasonably), so I
@@ -895,9 +960,9 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
      *
      * Anyway.  Go! */
 
-    incomplete_session->async_accept_log_in
+    Server_session_dtl<Server_session_obj>{ *incomplete_session }.async_accept_log_in
       (this,
-       init_channels_by_srv_req, // Our async out-arg for them to set on success (before on_done_func(Error_code())).
+       init_channels_by_srv_req, // Our async out-arg for them to set on success (before on_done_func(Error_code{})).
        mdt_from_cli_or_null, // Ditto.
        init_channels_by_cli_req, // Ditto.
 
@@ -908,7 +973,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
        std::move(n_init_channels_by_srv_req_func), // How many channels does our caller want to set up?
        std::move(mdt_load_func), // Let caller fill out srv->cli metadata!
 
-       [this, incomplete_session_observer = Incomplete_session_observer(incomplete_session),
+       [this, incomplete_session_observer = Incomplete_session_observer{incomplete_session},
         target_session, on_done_func = std::move(on_done_func)]
          (const Error_code& async_err_code)
     {
@@ -920,7 +985,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
         /* No matter what -- the session is no longer incomplete; either it accepted log-in in OK or not.
          * Remove it from *this.  We'll either forget it (error) or give it to user (otherwise).  Anyway remove it. */
         {
-          Lock_guard incomplete_sessions_lock(m_state->m_mutex);
+          Lock_guard incomplete_sessions_lock{m_state->m_mutex};
 #ifndef NDEBUG
           const bool erased_ok = 1 ==
 #endif
@@ -947,11 +1012,11 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
       } // if (incomplete_session) (but it may have been nullified inside <=> async_err_code is truthy)
       else // if (!incomplete_session)
       {
-        /* Server_session_dtl disappeared under us, because *this is disappearing under us.
+        /* Server_session_obj disappeared under us, because *this is disappearing under us.
          * Naturally no need to remove it from any m_incomplete_sessions, since that's not a thing.
          * However this sanity check is worthwhile: */
         assert((async_err_code == error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER)
-               && "The incomplete-session Server_session_dtl can only disappear under us if *this is destroyed "
+               && "The incomplete-session Server_session_obj can only disappear under us if *this is destroyed "
                     "which can only occur <=> operation-aborted is emitted due to *this destruction destroying that "
                     "incomplete-session.");
       } // else if (!incomplete_session)
@@ -971,16 +1036,39 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
       FLOW_LOG_INFO("Session acceptor [" << *this << "]: Async-accept request: Successfully resulted in logged-in "
                     "server session [" << *incomplete_session << "].  Feeding to user via callback.");
 
-      /* Server_session_dtl *is* Server_session, just with an added public API; now we reinterpret the pointer
-       * and give the user the Server_session without that public API which accesses its internals. */
-      *target_session = std::move(*(static_cast<Server_session_obj*>(incomplete_session.get())));
+      *target_session = std::move(*incomplete_session);
       // *incomplete_session is now as-if default-cted.
 
-      on_done_func(async_err_code); // Pass in Error_code().
+      on_done_func(async_err_code); // Pass in Error_code{}.
       FLOW_LOG_TRACE("Handler finished.");
     }); // incomplete_session->async_accept_log_in()
   }); // m_master_sock_acceptor->async_accept()
 } // Session_server_impl::async_accept()
+
+TEMPLATE_SESSION_SERVER_IMPL
+size_t CLASS_SESSION_SERVER_IMPL::mq_msg_size_limit() const
+{
+  static_assert(Server_session_obj::S_MQS_ENABLED,
+                "Nonsensical to call this for a Session_server concrete type that is not MQ-enabled.");
+
+  return m_mq_msg_size_limit;
+}
+
+TEMPLATE_SESSION_SERVER_IMPL
+void CLASS_SESSION_SERVER_IMPL::mq_msg_size_limit(size_t limit)
+{
+  static_assert(Server_session_obj::S_MQS_ENABLED,
+                "Nonsensical to call this for a Session_server concrete type that is not MQ-enabled.");
+
+  const auto prev_limit = m_mq_msg_size_limit;
+  m_mq_msg_size_limit = flow::util::round_to_multiple(limit, flow::util::max_align_sz());
+  /* Rounding it to the "worst" possible alignment might prevent some annoying pain in various places, like
+   * interaction with capnp segment sizes and who knows what else.  Really can't hurt.  (x86-64 => this is 16 BTW.) */
+
+  FLOW_LOG_INFO("MQ msg-size limit changed via user call: [" << prev_limit << "] => round-up[" << limit << "] = "
+                "[" << m_mq_msg_size_limit << "]; 0 = we choose based on best struc::Channel perf.  "
+                "This affects all subsequently created channels including in already-existing session(s) if any.");
+}
 
 TEMPLATE_SESSION_SERVER_IMPL
 void CLASS_SESSION_SERVER_IMPL::to_ostream(std::ostream* os) const

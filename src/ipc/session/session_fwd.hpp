@@ -253,6 +253,9 @@ struct App;
 struct Server_app;
 struct Client_app;
 
+template<typename Master_structured_channel_t>
+class Info_collector;
+
 template<typename Session_impl_t>
 class Session_mv;
 
@@ -261,7 +264,7 @@ class Server_session_mv;
 template<typename Client_session_impl_t>
 class Client_session_mv;
 
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload = ::capnp::Void>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload = ::capnp::Void>
 class Session_server;
 
 /**
@@ -272,9 +275,9 @@ class Session_server;
  * The following important template parameters are *knobs* that control the properties of the session;
  * the opposing #Client_session must use identical settings.
  *
- * @tparam S_MQ_TYPE_OR_NONE
+ * @tparam MQ_TYPE_OR_NONE
  *         Identical to #Client_session.
- * @tparam S_TRANSMIT_NATIVE_HANDLES
+ * @tparam TRANSMIT_NATIVE_HANDLES
  *         Identical to #Client_session.
  * @tparam Mdt_payload
  *         See Session concept.  In addition the same type may be used for `mdt_from_cli_or_null` (and srv->cli
@@ -284,9 +287,9 @@ class Session_server;
  * @see Server_session_mv for full API and its documentation.
  * @see Session: implemented concept.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload = ::capnp::Void>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload = ::capnp::Void>
 using Server_session
-  = Server_session_mv<Server_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
+  = Server_session_mv<Server_session_impl<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
 
 /**
  * A vanilla `Client_session` with no optional capabilities.  See Client_session_mv (+doc header) for full API as
@@ -296,12 +299,12 @@ using Server_session
  * The following important template parameters are *knobs* that control the properties of the session;
  * the opposing #Server_session must use identical settings.
  *
- * @tparam S_MQ_TYPE_OR_NONE
+ * @tparam MQ_TYPE_OR_NONE
  *         Session::Channel_obj (channel openable via `open_channel()` on this or other side) type config:
  *         Enumeration constant that specifies which type of MQ to use (corresponding to all available
  *         transport::Persistent_mq_handle concept impls) or to not use one (`NONE`).  Note: This `enum` type is
  *         capnp-generated; see common.capnp for values and brief docs.
- * @tparam S_TRANSMIT_NATIVE_HANDLES
+ * @tparam TRANSMIT_NATIVE_HANDLES
  *         Session::Channel_obj (channel openable via `open_channel()` on this or other side) type config:
  *         Whether it shall be possible to transmit a native handle via the channel.
  * @tparam Mdt_payload
@@ -313,10 +316,10 @@ using Server_session
  * @see Client_session_mv for full API and its documentation.
  * @see Session: implemented concept.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES,
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES,
          typename Mdt_payload = ::capnp::Void>
 using Client_session
-  = Client_session_mv<Client_session_impl<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
+  = Client_session_mv<Client_session_impl<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
 
 // Free functions.
 
@@ -339,7 +342,7 @@ using Client_session
  *        system error codes if ownership cannot be checked.
  */
 void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path& path, const App& app,
-                                  Error_code* err_code = 0);
+                                  Error_code* err_code = nullptr);
 
 /**
  * Identical to the other ensure_resource_owner_is_app() overload but operates on a pre-opened `Native_handle`
@@ -358,7 +361,7 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
  *        system error codes if ownership cannot be checked (invalid descriptor, un-opened descriptor, etc.).
  */
 void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_handle handle, const App& app,
-                                  Error_code* err_code = 0);
+                                  Error_code* err_code = nullptr);
 
 
 /**
@@ -399,6 +402,22 @@ std::ostream& operator<<(std::ostream& os, const Client_app& val);
  * @return `os`.
  */
 std::ostream& operator<<(std::ostream& os, const Server_app& val);
+
+/**
+ * Prints the entire Info_collector stats bundle to the given `ostream`, formatted per `val.m_fmt`
+ * (see Info_collector doc header); or a note that the stats are unavailable, if `!val.master_channel_live()`.
+ *
+ * @relatesalso Info_collector
+ *
+ * @param os
+ *        Stream to which to write.
+ * @param val
+ *        Object to serialize.
+ * @return `os`.
+ */
+template<typename Master_structured_channel_t>
+std::ostream& operator<<(std::ostream& os,
+                         const Info_collector<Master_structured_channel_t>& val);
 
 /**
  * Prints string representation of the given `Session_mv` to the given `ostream`.
@@ -455,10 +474,9 @@ std::ostream& operator<<(std::ostream& os, const Client_session_mv<Client_sessio
  *        Object to serialize.
  * @return `os`.
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 std::ostream& operator<<(std::ostream& os,
-                         const Session_server
-                                 <S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>& val);
+                         const Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>& val);
 
 } // namespace ipc::session
 
