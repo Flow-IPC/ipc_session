@@ -1804,6 +1804,10 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
        * an `m_srv = srv` or some-such.) */
       m_mq_msg_size_limit_func = [srv]() -> size_t { return srv->mq_msg_size_limit(); };
     }
+    else // In this instantiation `srv` has no use; it is captured for the other one.  Pacify the compiler:
+    {
+      static_cast<void>(srv);
+    }
 
     /* We'll want to check these OS-reported remote-process credentials against something during the log-in
      * procedure that is coming next; per remote_peer_process_credentials() doc header it's best to call it
