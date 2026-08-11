@@ -169,7 +169,7 @@ std::pair<string, string> run_session_lifecycle()
 template<MqType MQ_TYPE, ShmType SHM_TYPE>
 void census_after_civilized_lifecycle()
 {
-  const auto [srv_app_name, cli_app_name] = run_session_lifecycle<MQ_TYPE, SHM_TYPE>();
+  const auto& srv_app_name = run_session_lifecycle<MQ_TYPE, SHM_TYPE>().first;
   EXPECT_TRUE(poll_until([&]() { return count_names_containing(srv_app_name) == 0; }))
     << "Kernel-persistent residue naming Server_app [" << srv_app_name << "] remained after graceful "
        "session teardown.";
@@ -253,7 +253,9 @@ TEST(Session_persistent_cleanup_test, Scope_binding_census_bipc_mq_shm_jemalloc)
 TEST(Session_persistent_cleanup_test, Crash_sweep_shm_classic)
 {
   // Lifecycle #1 just to learn the app names for this combo (and prove clean baseline).
-  const auto [srv_app_name, cli_app_name] = run_session_lifecycle<MqType::NONE, ShmType::CLASSIC>();
+  const auto app_names = run_session_lifecycle<MqType::NONE, ShmType::CLASSIC>();
+  const auto& srv_app_name = app_names.first;
+  const auto& cli_app_name = app_names.second;
 
   const auto corpse
     = build_conventional_shared_name(Shared_name::S_RESOURCE_TYPE_ID_SHM,
@@ -278,7 +280,9 @@ void crash_sweep_mq()
 {
   using Mq_base_impl = Blob_stream_mq_base_impl<Mq>;
 
-  const auto [srv_app_name, cli_app_name] = run_session_lifecycle<MQ_TYPE, ShmType::NONE>();
+  const auto app_names = run_session_lifecycle<MQ_TYPE, ShmType::NONE>();
+  const auto& srv_app_name = app_names.first;
+  const auto& cli_app_name = app_names.second;
 
   const auto mq_corpse
     = build_conventional_shared_name(Mq::S_RESOURCE_TYPE_ID,
@@ -333,7 +337,9 @@ TEST(Session_persistent_cleanup_test, Crash_sweep_shm_jemalloc)
 {
   using session::shm::arena_lend::jemalloc::SHM_SUBTYPE_PREFIX;
 
-  const auto [srv_app_name, cli_app_name] = run_session_lifecycle<MqType::NONE, ShmType::JEMALLOC>();
+  const auto app_names = run_session_lifecycle<MqType::NONE, ShmType::JEMALLOC>();
+  const auto& srv_app_name = app_names.first;
+  const auto& cli_app_name = app_names.second;
 
   const auto dead_pid = make_dead_pid();
   const auto live_pid = util::Process_credentials::own_process_id();
