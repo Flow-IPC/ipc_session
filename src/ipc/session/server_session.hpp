@@ -148,7 +148,7 @@ public:
 
   /**
    * To be invoked by public user upon first obtaining `*this`: memorizes the given on-error and on-passive-open
-   * handlers thus moving this Server_session_mv to PEER state wherein it is a formal Session concept impl.
+   * handlers thus moving this session::Server_session_mv to PEER state wherein it is a formal Session concept impl.
    *
    * Using this overload indicates passive-opens are enabled on this side.
    *
