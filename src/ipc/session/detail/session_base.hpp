@@ -57,6 +57,21 @@ namespace ipc::session
  * behavior between Server_session_impl and Client_session_impl (and variants).  More info on
  * Session_base::Graceful_finisher in its own doc header.
  *
+ * @todo Session_base is in detail/ and is formally documented at the top of its doc header as "internal"; and
+ * indeed it is out-of-the-box; but the ipc::session hierarchies are also formally user-extensible, so Session_base
+ * should be publicly exposed after all.  Hence remove the "internal" verbiage; move the file; and go over its
+ * source code/design, in case something about its API is too "Inside Baseball."  To be clear, though, this is
+ * not of the highest priority: 1, detail/ or not it can still be sub-classed in a pinch; 2, arguably more saliently,
+ * extending ipc::session hierarchies is a rare thing for a user to want to do in practice.  It's an
+ * API-versus-SPI situation that isn't fully clean here.  (Generally in Flow-IPC we endeavour to keep that fully clean.)
+ *
+ * @todo The to-do preceding this one in the source code has corollaries: There are probably some (not all)
+ * `_impl`y classes/class templates that are in detail/ but should not be, given that formally ipc::session
+ * is user-extensible.  Again, though: 1, detail/ or not it (for each "it") can still be accessed in a
+ * pinch; 2, arguably more saliently, extending ipc::session hierarchies is a rare thing for a user to want to do
+ * in practice.  It's an API-versus-SPI situation that isn't fully clean here.  (Generally in Flow-IPC we endeavour
+ * to keep that fully clean.)
+ *
  * @tparam Mdt_payload
  *         See #Server_session, #Client_session (or Session concept).
  * @tparam MQ_TYPE_OR_NONE
