@@ -590,8 +590,8 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      *       a problem in the environment: let's not even risk that stuff.
      *     - Associated shared mutex (in Linux apparently a semaphore thingie).  This is an interesting situation;
      *       it is not mentioned in the aforementioned design in detail -- too much of an impl detail for that --
-     *       so let's consider it.  Should the Server_app UID:GID apply to it too?  Actually not quite: the way we use it,
-     *       it's a symmetrically shared resource (read/write for both us and client), but more to the point
+     *       so let's consider it.  Should the Server_app UID:GID apply to it too?  Actually not quite: the way
+     *       we use it, it's a symmetrically shared resource (read/write for both us and client), but more to the point
      *       the *client* is *allowed* to create it (hence OPEN_OR_CREATE both here and in Client_session_impl): it's
      *       accessed in order to get one's turn at accessing the CNS file, and to be "accessed" it must be created
      *       as needed (and then it'll keep existing until reboot).  So actually the *GID* should be correct
@@ -723,10 +723,10 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
          *   - Pass in an fstream-or-FD-or-similar (we've opened the file after all, so there is one), not a name.
          *   - Use something in C++/C standard library or Boost, not an OS call.
          *
-         * It's nice to want things.  On the FD front we're somewhat screwed; there is a gcc-oriented hack to get the FD,
-         * but it involves protected access and non-standard stuff.  Hence we must work from the `path` cns_path.
-         * We've created it, so it really should work, even if it's a little slower or what-not.  As for using
-         * a nice library... pass the buck: */
+         * It's nice to want things.  On the FD front we're somewhat screwed; there is a gcc-oriented hack to get
+         * the FD, but it involves protected access and non-standard stuff.  Hence we must work from the `path`
+         * cns_path.  We've created it, so it really should work, even if it's a little slower or what-not.
+         * As for using a nice library... pass the buck: */
         ensure_resource_owner_is_app(get_logger(), cns_path, m_srv_app_ref, &our_err_code);
         if ((!our_err_code) && we_created_cns)
         {
@@ -914,7 +914,7 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
     auto cli_app_lookup_func = [this](String_view cli_app_name) -> const Client_app*
     {
       const auto cli_it = m_cli_app_master_set_ref.find(string{cli_app_name});
-      return (cli_it == m_cli_app_master_set_ref.end()) ? static_cast<const Client_app*>(0) : &cli_it->second;
+      return (cli_it == m_cli_app_master_set_ref.end()) ? nullptr : &cli_it->second;
     };
 
     /* And this one is required to issue a unique cli-namespace, if all goes well.  The "if all goes well" part

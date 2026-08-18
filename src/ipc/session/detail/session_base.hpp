@@ -875,7 +875,7 @@ CLASS_SESSION_BASE::Session_base(const Server_app& srv_app_ref) :
    * m_cli_namespace is generated on server side during log-in proceedings; set_cli_namespace() invoked at that time. */
 
   m_srv_app_ref(srv_app_ref), // Not copied!
-  m_cli_app_ptr(0), // null for now.
+  m_cli_app_ptr(nullptr),
   // As promised, we know our own srv-namespace:
   m_srv_namespace(Shared_name::ct(std::to_string(util::Process_credentials::own_process_id())))
   // m_cli_namespace + m_on_err_func and m_on_passive_open_channel_func_or_empty remain .empty() for now.
