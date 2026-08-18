@@ -131,7 +131,7 @@ namespace ipc::session
  * open_channel() is used to initiate a channel opening on one side, and the on-passive-open handler is used
  * to accept the same on the other side (for a given channel).  The result, on each side, is a #Channel_obj,
  * which is a `Channel` template instantiation.  Note that it is not a `struc::Channel`; the user may choose
- * to immediate convert `Channel` to `struc::Channel` via std::move(), but whether they want to or not is up
+ * to immediate convert `Channel` to `struc::Channel` via `std::move()`, but whether they want to or not is up
  * to them and their desired use case.  Now, there are millions of patterns of what the acceptor might want
  * to accept in a session; there could be one channel for some app-wide updates and one per processor core;
  * and possibly more differentiation than that regarding which channel is for what purpose.  Meanwhile the only
