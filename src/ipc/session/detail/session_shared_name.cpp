@@ -38,7 +38,7 @@ std::once_flag non_global_scope_name_regex_built;
 /// File-local helper variable: ensures #global_scope_name_regex is built thread-safely only once.
 std::once_flag global_scope_name_regex_built;
 
-}; // namespace (anon)
+} // namespace (anon)
 
 Shared_name build_conventional_shared_name
               (const Shared_name& resource_type, const Shared_name& srv_app_name,

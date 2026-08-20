@@ -21,6 +21,7 @@
 #include "ipc/session/session_fwd.hpp"
 #include "ipc/util/detail/util_fwd.hpp"
 #include "ipc/util/sync_io/sync_io_fwd.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 #include <boost/move/make_unique.hpp>
 
 namespace ipc::session::sync_io

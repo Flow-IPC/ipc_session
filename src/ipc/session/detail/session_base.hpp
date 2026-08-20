@@ -376,7 +376,7 @@ protected:
    * contracts.
    *
    * Now we explain what we're solving (Rationale); then how we solve it (Design).  The latter is much simpler,
-   * we think, to understand then the former.  Hence apologies in advance for the length of "Rationale" section.
+   * we think, to understand than the former.  Hence apologies in advance for the length of "Rationale" section.
    *
    * ### Rationale ###
    * Consider a particular Client_session_impl + Server_session_impl class/object pair, A and B.  In this case --
@@ -1109,7 +1109,7 @@ void CLASS_SESSION_BASE::Graceful_finisher::on_master_channel_hosed()
   {
     // Interesting.  @todo Maybe log?
   }
-} // } // Session_base::Graceful_finisher::on_master_channel_hosed()
+} // Session_base::Graceful_finisher::on_master_channel_hosed()
 
 TEMPLATE_SESSION_BASE
 void CLASS_SESSION_BASE::Graceful_finisher::on_dtor_start()
