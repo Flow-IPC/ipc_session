@@ -781,7 +781,7 @@ private:
    *        Like the preceding but opposite-direction (server->client).
    * @param local_hndl_or_null
    *        If #S_SOCKET_STREAM_ENABLED this is our pre-connected `Native_handle`; the server did `connect_pair()`
-   *        and sent us 1/2 of the pair.  Else null/ignored.  On error it is `.release()`d; on success
+   *        and sent us 1/2 of the pair.  Else null/ignored.  On error it is `.close()`d; on success
    *        `*opened_channel_ptr` shall own it.
    * @param opened_channel_ptr
    *        Target #Channel_obj we shall try to move-to PEER state.  It'll be left unmodified if
@@ -1890,7 +1890,7 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_init_open_channel
 
   auto local_hndl_or_null = open_channel_msg->emit_native_handle_or_null();
   /* Our responsibility, now, to return handle (if not null) to OS.  Once wrapped in a Channel, it'll take
-   * care of it.  If anything fails before then, we must .release() it ourselves. */
+   * care of it.  If anything fails before then, we must .close() it ourselves. */
 
   const auto mq_name_c2s_or_none = Shared_name::ct(string(root.getClientToServerMqAbsNameOrEmpty()));
   const auto mq_name_s2c_or_none = Shared_name::ct(string(root.getServerToClientMqAbsNameOrEmpty()));
@@ -2380,7 +2380,7 @@ bool CLASS_CLI_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
 
     Native_handle local_hndl_or_null = open_channel_rsp->emit_native_handle_or_null();
     /* Our responsibility, now, to return handle (if not null) to OS.  Once wrapped in a Channel, it'll take
-     * care of it.  If anything fails before then, we must .release() it ourselves. */
+     * care of it.  If anything fails before then, we must .close() it ourselves. */
 
     const auto mq_name_c2s_or_none = Shared_name::ct(string(root.getClientToServerMqAbsNameOrEmpty()));
     const auto mq_name_s2c_or_none = Shared_name::ct(string(root.getServerToClientMqAbsNameOrEmpty()));
@@ -2459,7 +2459,7 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_open_channel_req
 
     auto local_hndl_or_null = open_channel_req->emit_native_handle_or_null();
     /* Our responsibility, now, to return handle (if not null) to OS.  Once wrapped in a Channel, it'll take
-     * care of it.  If anything fails before then, we must .release() it ourselves. */
+     * care of it.  If anything fails before then, we must .close() it ourselves. */
 
     const auto mq_name_c2s_or_none = Shared_name::ct(string(root.getClientToServerMqAbsNameOrEmpty()));
     const auto mq_name_s2c_or_none = Shared_name::ct(string(root.getServerToClientMqAbsNameOrEmpty()));
@@ -2594,7 +2594,7 @@ void CLASS_CLI_SESSION_IMPL::create_channel_obj(const Shared_name& mq_name_c2s_o
 
     if ((*err_code_ptr = (err_code1 ? err_code1 : err_code2)))
     {
-      local_hndl_or_null.release(); // If not null then return it to OS; else it will leak.
+      local_hndl_or_null.close(); // If not null then return it to OS; else it will leak.
 
       FLOW_LOG_WARNING("Client session [" << *this << "]: Open-channel (active? = [" << active_else_passive << "]): "
                        "Request or response received and indicates opposing peer (server) generated channel "
@@ -2616,7 +2616,7 @@ void CLASS_CLI_SESSION_IMPL::create_channel_obj(const Shared_name& mq_name_c2s_o
                                                         std::move(local_hndl_or_null)},
                                    err_code_ptr};
       /* If *err_code_ptr truthy, then the (now-gone) Native_socket_stream already did own local_hndl_or_null,
-       * so we need not .release() it. */
+       * so we need not .close() it. */
     }
     else // if constexpr(!S_SOCKET_STREAM_ENABLED)
     {
