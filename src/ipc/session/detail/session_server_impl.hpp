@@ -779,7 +779,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
          err_code);
 
   // See class doc header.  Start this very-idle thread for a bit of corner case work.
-  if (err_code && (!*err_code))
+  if ((!err_code) || (!*err_code)) // Attn: null err_code = throwing form: if we are here, it succeeded.
   {
     m_state->m_incomplete_session_graveyard->start(reset_this_thread_pinning);
     // Don't inherit any strange core-affinity!  ^-- Worker must float free.
