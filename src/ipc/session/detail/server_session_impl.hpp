@@ -25,6 +25,7 @@
 #include "ipc/transport/native_socket_stream_cfg.hpp"
 #include "ipc/util/process_credentials.hpp"
 #include <optional>
+#include <type_traits>
 
 namespace ipc::session
 {
@@ -1228,6 +1229,10 @@ typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_bui
                                                     resources_acquired_ok
                                                       ? std::move(opened_channel)
                                                       : Channel_obj{} }};
+  assert((static_cast<const void*>(open_channel_req_ptr.get())
+            == static_cast<const void*>(&open_channel_req_ptr->m_mdt_builder))
+         && "open_channel() recovers the struct from this member; it must sit at offset 0.");
+
   return Mdt_builder_ptr{std::move(open_channel_req_ptr), &open_channel_req_ptr->m_mdt_builder};
 } // Server_session_impl::mdt_builder()
 

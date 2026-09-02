@@ -31,6 +31,7 @@
 #include <boost/interprocess/sync/named_mutex.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/move/make_unique.hpp>
+#include <type_traits>
 #include <cstddef>
 
 namespace ipc::session
@@ -603,7 +604,7 @@ private:
    *
    * Why store the `Builder`, if it can always be obtained from #m_req_msg?  Answer: On one hand,
    * mdt_builder() needs to return that `Builder`, so that the user can set the metadata.  However,
-   * open_channel() aims to then stuff the underlying bits into the open-channel request out-message which is
+   * open_channel() aims to then stuff the underlying bits into the open-channel request out-message which
    * is our internal impl detail, unknown to the user.  We could return a stand-alone just-the-metadata structure
    * and `Builder` to it, but (1) then we'd have to transfer that over into the out-message -- slow, possibly
    * painful (involving capnp orphans), and (2) it has to be backed by a `MessageBuilder`.  So we'd have to
@@ -617,7 +618,7 @@ private:
    *     to just the `Builder` (all they care about), but it's actually in the `shared_ptr` group of the real
    *     ref-counted datum, this `struct`.
    *   - open_channel() receives the alias, which points to the `Builder`.  Since the `Builder` is the first
-   *     member of this `struct`, its raw address (by C++ aliasing rules) equals that of the whole `struct`.
+   *     member of this `struct` (which has no bases or virtuals), its raw address equals that of the whole `struct`.
    *     Hence open_channel() can get to the `struct` and thus to the out-message member #m_req_msg.  It can
    *     then transport::struc::Channel::send() that.
    */
@@ -627,9 +628,8 @@ private:
 
     /**
      * The `Builder` `m_req_msg->body_root()->getMetadata()`.
-     * @warning As of this writing this *must* be the first member.  Otherwise one would need to use something like
-     *          `offsetof` to be able to get from `&m_mdt_builder` (what mdt_builder() returns)
-     *          to `this` and hence to #m_req_msg to `send()`.
+     * @warning This *must* be the first member: open_channel() recovers the containing `struct` from
+     *          `&m_mdt_builder` (what mdt_builder() returns).  Offset-zero is guaranteed sans bases/`virtual`.
      */
     typename Mdt_builder_ptr::element_type m_mdt_builder;
 
@@ -2244,6 +2244,10 @@ typename CLASS_CLI_SESSION_IMPL::Mdt_builder_ptr CLASS_CLI_SESSION_IMPL::mdt_bui
                         : req_msg.body_root()->initOpenChannelToServerReq().initMetadata();
 
   Master_channel_req_ptr req_ptr{new Master_channel_req{ mdt_root, std::move(req_msg) }};
+
+  assert((static_cast<const void*>(req_ptr.get()) == static_cast<const void*>(&req_ptr->m_mdt_builder))
+         && "open_channel() recovers the struct from this member; it must sit at offset 0.");
+
   return Mdt_builder_ptr{std::move(req_ptr), &req_ptr->m_mdt_builder};
 } // Client_session_impl::mdt_builder()
 
