@@ -84,7 +84,8 @@ template<typename... Ctor_args>
 auto Server_session_dtl<Base_t>::ct_base(Ctor_args&&... ctor_args) -> Base_t
 // Doxygen 1.9.4 gets confused here otherwise; the `->` form is a work-around for that.  @todo Revisit with later ver.
 {
-  return Base{std::forward<Ctor_args>(ctor_args)...};
+  // Out of abundance of caution: Avoid initializer-list pitfalls in this generic code: (), not {} here.
+  return Base(std::forward<Ctor_args>(ctor_args)...);
 }
 
 template<typename Base_t>
