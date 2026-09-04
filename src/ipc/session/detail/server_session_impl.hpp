@@ -1531,6 +1531,13 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
   using Peer_socket = transport::asio_local_stream_socket::Peer_socket<transport::Native_socket_stream_cfg::Protocol>;
   using flow::util::ostream_op_string;
 
+  /* @todo It did not exist in the past, but now it does: the auto-closing Native_handle variant, Own_native_handle.
+   * Use it, locally in here or more widely in *this, to ensure leaking of naked handles (FDs in *nix) does not
+   * happen.  As I write this, it looks solid, but the logic is unnecessarily brittle and easy for maintainers
+   * to break.  Details TBD, but the basic idea is: a naked non-.null() Native_handle should exist as little
+   * as possible; if it's not owned by something else (Peer_socket, Native_socket_stream, Channel, whatever), then
+   * it should be in an Own_native_handle.  Lots of words here... but it's pretty straightforward really. */
+
   // We are in thread W.
   auto& opened_channel = *opened_channel_ptr;
   auto& remote_hndl_or_null = *remote_hndl_or_null_ptr;
@@ -1547,6 +1554,8 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
   const auto nickname = active_else_passive ? ostream_op_string("active", ++m_last_actively_opened_channel_id)
                                             : ostream_op_string("passive", ++m_last_passively_opened_channel_id);
 
+  /* Returns false => won't leak anything generated therein; remote_hndl_or_null will be .null(); sys_err_code
+   * will be set. */
   [[maybe_unused]] const auto make_sock_stm_func = [&]()
   {
     Native_handle local_hndl;
@@ -1627,6 +1636,14 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
       Persistent_mq_handle_from_cfg::remove_persistent(get_logger(), mq_name_s2c_or_none, &ignored);
 
       opened_channel = Channel_obj{}; // For cleanliness / no pointless threads sitting around....
+
+      /* If make_sock_stm_func() was called and succeeded, then Channel_obj-creation failed; but the
+       * remote_hndl_or_null from the former would now leak.  So don't let it.
+       *
+       * If it was not called (not _ENABLED), or it was but failed, then remote_hndl_or_null is .null(), so
+       * this just no-ops. */
+      remote_hndl_or_null.close();
+
       return false;
     }
     // else { Yay! }
