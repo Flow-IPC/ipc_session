@@ -1575,7 +1575,7 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
           // else
 
           /* Back to the drawing board (no async-op started); and while at the drawing board the master channel is
-           * null; so make it so. err_code is set. */
+           * null; so make it so.  err_code is set. */
           m_master_channel.reset();
           // Fall through.
         } // if (!err_code) [from sock_stm.sync_connect()] (might have become truthy inside though)
@@ -1957,9 +1957,11 @@ void CLASS_CLI_SESSION_IMPL::on_master_channel_init_open_channel
   // else
   if (err_code)
   {
-    // Sigh.  send() emitted error: we must handle it.  Go to NULL state as, e.g., if log-in request send() fails.
-
+    /* Sigh.  send() emitted error: we must handle it.  Go to NULL state (=> m_master_channel null) as, e.g.,
+     * if log-in request send() fails. */
+    m_master_channel.reset();
     return_to_null_state();
+
     FLOW_LOG_TRACE("Client session [" << *this << "]: Session-connect request: Master channel Native_socket_stream "
                    "async-connect succeeded, and the log-in request sending "
                    "succeeded, and the log-in response was received OK, and then channel-opening "
