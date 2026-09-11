@@ -238,9 +238,8 @@ public:
    * @warning `srv_app_ref` and `cli_app_master_set_ref` -- and the `Client_app`s to which the latter
    *          (transitively) refers -- must remain alive throughout `*this` lifetime, as well as that of
    *          any `Server_session` yielded by async_accept(): their *addresses* are stored and accessed at
-   *          various points later (e.g., when `ostream<<` prints `*this` or a `Server_session`).  This
-   *          is consistent with the intended global-registry lifecycle of Server_app/Client_app/App; see
-   *          the `struct` App doc header.
+   *          various points later.  This is consistent with the intended global-registry lifecycle of
+   *          Server_app/Client_app/App; see the `struct` App doc header.
    *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
@@ -248,9 +247,9 @@ public:
    *        Properties of this server application.  The address is copied; the object is not copied.
    * @param cli_app_master_set_ref
    *        The set of all known `Client_app`s.  The address is copied; the object is not copied.
-   *        Technically, from our POV, it need only list the `Client_app`s whose names are
+   *        Technically, from our PoV, it need only list the `Client_app`s whose names are
    *        in `srv_app_ref.m_allowed_client_apps`.  Refer to App doc header for best practices on
-   *        maintaining this master list in practice.
+   *        maintaining this master list.
    * @param err_code
    *        See `flow::Error_code` docs for error reporting semantics.  #Error_code generated:
    *        error::Code::S_INVALID_ARGUMENT (`srv_app_ref`'s, or a `cli_app_master_set_ref` member's, App::m_name

@@ -169,9 +169,8 @@ public:
    * Constructs (passive-opens allowed form) in NULL state.  To be useful, invoke sync_connect() next.
    *
    * @warning `cli_app_ref` and `srv_app_ref` must remain alive throughout `*this` lifetime: their *addresses*
-   *          are stored and accessed at various points later (e.g., when `ostream<<` prints `*this`).  This is
-   *          consistent with the intended global-registry lifecycle of Client_app/Server_app/App; see the
-   *          `struct` App doc header.
+   *          are stored and accessed at various points later.  This is consistent with the intended
+   *          global-registry lifecycle of Client_app/Server_app/App; see the `struct` App doc header.
    *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
