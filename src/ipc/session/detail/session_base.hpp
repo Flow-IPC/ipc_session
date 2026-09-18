@@ -293,7 +293,7 @@ protected:
    * By default in Linux POSIX MQs this happens to be the actual limit for message size --
    * visible in /proc/sys/fs/mqueue/msgsize_max -- so we cannot go higher typically.  However that file can be modified.
    * For now we assume a typical environment; or at least that it will not go *below* this typical default.
-   * If did try a higher number here, opening of MQs by server will likely emit an error and refuse
+   * If we did try a higher number here, opening of MQs by server will likely emit an error and refuse
    * (Server_session_impl::make_channel_mqs()).
    *
    * ### Things to consider if changing the value away from the above ###
@@ -310,7 +310,10 @@ protected:
    *   If ::ipc has not yet been released in production, ever, then it's fine (assuming, that is, it'll work
    *   in the first place given the aforementioned `/proc/sys/...` limit for POSIX MQs).  If it *has* been
    *   released, but you can guarantee (via release process) that the client and server will always use the same ::ipc
-   *   software, then you're still fine.  Just change this value; done.
+   *   software, then you're still fine.  Just change this value; done.  (Note: A simple way to assure the opposing
+   *   peer is appropriately upgraded is to carry out a  `Protocol_negotiator` version(s) bump -- without allowing
+   *   backward-compatibility, meaning min-supported-version=max-supported-version.  There are at least a couple
+   *   potential layers at which to do this bump, so just pick the right one is all.)
    */
   static constexpr size_t S_MQS_MAX_MSG_SZ = 8 * 1024;
 
