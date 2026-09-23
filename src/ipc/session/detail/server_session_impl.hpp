@@ -144,7 +144,7 @@ namespace ipc::session
  * ### PEER state impl ###
  * Here our algorithm is complementary to the PEER state algorithm in Client_session_impl.  Namely we expect
  * passive-opens via an appropriate transport::struc::Channel::expect_msgs(); and we allow active-opens via
- * open_channel(). The details of how these work is best understood just by reading that code inline.  All in
+ * open_channel().  The details of how these work is best understood just by reading that code inline.  All in
  * all, publicly it's just like Client_session_impl; but internally it is its complement and in fact has
  * different (complementary) responsibilities.  Most notably, regarding active-opens and passive-opens:
  *   - Server_session_impl is the one always internally responsible for acquiring the resources needed to
@@ -168,7 +168,10 @@ namespace ipc::session
  *
  * Otherwise open_channel() is set up similarly to Client_session_impl::open_channel(), namely the
  * non-blocking/synchronous facade with async-with-timeout internals.  See Client_session_impl doc header for
- * brief discussion.
+ * brief discussion.  In addition, the way work is distributed across threads U (user thread(s)) and thread W
+ * (#m_async_worker) inside open_channel() is deliberately asymmetric between open_channel() here and
+ * Client_session_impl::open_channel(); this avoids a certain cross-process deadlock situation.  This is explained
+ * inside open_channel().
  *
  * @tparam MQ_TYPE_OR_NONE
  *         See #Server_session counterpart.
@@ -694,12 +697,26 @@ private:
   mutable flow::async::Single_thread_task_loop m_async_worker;
 
   /**
-   * The session master channel.  Accessed in thread W only (not protected by mutex).
+   * The session master channel.  Accessed in thread W only, with one exception described below (struc::Channel
+   * API does *not* require synchronization even for concurrent calls).
    *   - Up to async_accept_log_in(): this is null.
    *   - When async_accept_log_in() is outstanding: this is not null.
    *     - If it fails (and it cannot be re-attempted) it is renullified (though it could've been left alone too;
    *       realistically dtor is coming soon... maybe reconsider that).
    *     - Otherwise it remains non-null and immutable until dtor.
+   *
+   * ### Concurrency ###
+   * Generally we do state-changing/accessing work in thread W (#m_async_worker); this is introduced in the
+   * class doc header.  As usual that way the state machine is linear without mutexes.  `m_master_channel`
+   * is part of that state and generally is only touched in thread W.
+   *
+   * There is however one necessary exception to this.  The `m_master_channel->sync_request()` call in
+   * open_channel() is carried out from thread U (a user thread).  The reason involves avoiding cross-process
+   * deadlock against a coincidentally concurrent *opposing* Client_session_impl::open_channel(); open_channel()
+   * body explains the details.
+   *
+   * Typically this would mean `m_master_channel` access would have to ~everywhere be protected with a mutex.
+   * In this case it is not necessary: as noted above struc::Channel API is safe against concurrent API calls.
    */
   Master_structured_channel_ptr m_master_channel;
 
@@ -1250,6 +1267,12 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
   FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(bool, open_channel, target_channel, mdt, _1);
   // ^-- Call ourselves and return if err_code is null.  If got to present line, err_code is not null.
 
+  /* Whether or not we promised this when returning false, this overall avoids some headaches/maintenance pain and
+   * allows us to, e.g., assert(!*err_code) up to a point.  Just remember that if *err_code becomes truthy,
+   * and *then* we decide to return false, it has to be ->cleared() again; otherwise we can mess up
+   * the operation of FLOW_ERROR_EXEC_AND_THROW_ON_ERROR(). */
+  err_code->clear();
+
   if (!mdt)
   {
     FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open active request: "
@@ -1259,10 +1282,64 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
   }
   // else
 
-  /* As usual do all the work in thread W, where we can access m_master_channel and m_state among other things.
-   * We do need to return the results of the operation here in thread U though. */
+  /* The plan:
+   *
+   * As usual we want to do all the work in thread W, where we can access m_master_channel and m_state among
+   * other things.  We do need to return the results of the operation here in thread U though.
+   * Client_session_impl::open_channel() is structured that way as well.
+   *
+   * Not so fast though.  There is a cross-process deadlock possibility that arises if we implement both
+   * Client_ and this Server_ open_channel()s in symmetrical fashion.  The deadlock is particularly nasty, as
+   * it would not typically manifest, but with coincidental timing it will:
+   *
+   * It requires both sides to execute open_channel() concurrently (and therefore to have registered a passive-open
+   * handler on each side).  So there's thread Ws (our thread W) and thread Wc (theirs).  In a symmetrical setup
+   * this could happen:
+   *   - [srv] thread Ws: SMC.sync_request() begins; awaits response (blocks).
+   *   - [cli] thread Wc: SMC.sync_request() begins; awaits response (blocks).
+   *   - [srv] thread SMCs: got request, invoke Server_session_impl handler;
+   *           that handler does Ws.post(Server_session_impl::on_master_channel_open_channel_req);
+   *           so Server_session_impl::on_master_channel_open_channel_req is *queued* on Ws
+   *           (Ws currently inside sync_request())
+   *   - [cli] thread SMCc: got request, invoke Client_session_impl handler;
+   *           that handler does Wc.post(Client_session_impl::on_master_channel_open_channel_req);
+   *           so Client_session_impl::on_master_channel_open_channel_req is *queued* on Wc
+   *           (Wc currently inside sync_request())
+   * And that's it.  on_master_channel_open_channel_req() queued on W, on each side; can't run; thread W
+   * has SMC.sync_request() waiting for *opposing* on_master_channel_open_channel_req() to reply to
+   * the request with an SMC.send(); both timeout after a long time; both receive the response, but it's past
+   * timeout, so it's dropped.  Incidentally this deadlock pattern is warned-about in Channel::sync_request()'s docs.
+   *
+   * To solve this: just changing one thing is sufficient: One side (not necessarily both), doesn't matter that
+   * much which (we choose srv-side -- that's here -- as we vaguely suspect it would more commonly passive-open
+   * and thus will be made somewhat more responsive), shall avoid executing SMC.sync_request() from thread W
+   * and do it in thread U instead.
+   *
+   * This is slightly annoying for two reasons.  1, it means jumping back and forth between U and W.  2, some
+   * state has to be accessed from not-W (something we avoid otherwise -- even in something as innocuous looking
+   * as session_token()).  1: oh well.  2: that "some state" is precisely the SMC m_master_channel.  See its
+   * doc header... but in short struc::Channel's API (unlike most others) is thread-safe.
+   *
+   * OK: so the naive plan would've been: U->W*->U->return, with `*` being the core SMC.sync_request().
+   * Instead this becomes: U->W->U*->W->U->return.  A few reminders, since this is somewhat unusual:
+   *   - open_channel() itself is not allowed to be called concurrently to itself (nor to any other APIs).
+   *     So there's no need to worry about concurrency in that sense.
+   *   - Our entire operation happens synchronously in this function.  So the lambdas involved capture [&], etc.
+   *     Keeps it relatively simple.
+   *     - (Related point: A different approach, which would have kept everything in thread W and therefore
+   *       more "normal" w/r/t Client_ and Server_ impl ways of doing things, would have been to use
+   *       SMC.async_request() instead of sync_request().  That'd be reasonable, but then there's more
+   *       asynchronicity which makes other things more complex.  On balance the sync_request() way is easier,
+   *       we stipulate.)
+   *   - Whenever we enter thread W, we must check hosed().  This is done all-over, but in this case
+   *     W is entered not once but twice; so even the 2nd time it has to be checked: It is possible some SMC
+   *     in-traffic hosed the SMC (*m_master_channel) and therefore *this, while perhaps near the tail end
+   *     of `U*`.
+   * Let's go. */
+
   bool sync_error_but_do_not_emit = false; // If this ends up true, err_code is ignored and clear()ed ultimately.
-  // If it ends up false, *err_code will indicate either success or non-fatal error.
+  // If it -^- ends up false, *err_code will indicate either success or non-fatal error.
+  Open_channel_req* open_channel_req = {}; // (Init to avoid overzealous warnings.)
 
   m_async_worker.post([&]()
   {
@@ -1282,8 +1359,8 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
      *
      * See mdt_builder(): It may be indicating to us the resource-unavailable error.  Check for this. */
 
-    auto& open_channel_req = *(reinterpret_cast<Open_channel_req*>(mdt.get()));
-    if (!open_channel_req.m_opened_channel.initialized())
+    open_channel_req = reinterpret_cast<Open_channel_req*>(mdt.get());
+    if (!open_channel_req->m_opened_channel.initialized())
     {
       // @todo Maybe save the original Error_code responsible for this instead of emitting this catch-all thingie?
       *err_code = error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE;
@@ -1300,15 +1377,50 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
     FLOW_LOG_INFO("Server session [" << *this << "]: Channel open active request: The blocking, but presumed "
                   "sufficiently quick to be considered non-blocking, request-response exchange initiating; timeout set "
                   "to a generous [" << round<milliseconds>(Base::S_OPEN_CHANNEL_TIMEOUT) << "].  The channel is "
-                  "already opened on our side: [" << open_channel_req.m_opened_channel << "].");
+                  "already opened on our side: [" << open_channel_req->m_opened_channel << "].");
+  }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker.post()
 
-    const auto open_channel_rsp = m_master_channel->sync_request(&open_channel_req.m_req_msg, nullptr,
-                                                                 Base::S_OPEN_CHANNEL_TIMEOUT, err_code);
+  // Thread U again.
+
+  if (sync_error_but_do_not_emit)
+  {
+    assert(!*err_code);
+    return false;
+  }
+  // else
+  if (*err_code)
+  {
+    return true;
+  }
+  /* else: All good for now.
+   *
+   * As planned in the big comment up-top: This part (and basically this part only) in thread U
+   * (m_master_channel-> potentially-concurrent (versus thread W) calls are allowed by struc::Channel): */
+  const auto open_channel_rsp = m_master_channel->sync_request(&open_channel_req->m_req_msg, nullptr,
+                                                               Base::S_OPEN_CHANNEL_TIMEOUT, err_code);
+
+  m_async_worker.post([&]()
+  {
+    // We are in thread W.
+
+    if (Base::hosed())
+    {
+      FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open request send-request stage proceeded, but "
+                       "upon re-entering the main worker thread, we discovered we've just been preempted "
+                       "by earlier session-hosed error.  "
+                       "No-op after all; forgetting any response from opposing side.");
+      sync_error_but_do_not_emit = true; // *err_code is cleared/ignored.
+      return;
+    }
+    /* else: Still good (no incoming-direction, or any other non-thread-U-originating, hosing has occurred).
+     * (As usual: m_master_channel can get hosed at any time though (but we will be informed after this task
+     * finishes, if that happens, at which point hose()ing of *this session-obj will execute).) */
 
     if ((!open_channel_rsp) && (!*err_code))
     {
       FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open request failed at the send-request stage "
                        "(due to incoming-direction error which shall hose session around this time).  No-op.");
+      // (Wouldn't we be hosed() during the check above then?  Well, no reason not to be defensive even if so.)
       sync_error_but_do_not_emit = true;
       return;
     }
@@ -1338,7 +1450,7 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
                        "session (emit to session on-error handler); will synchronously return failure to "
                        "open channel.");
       Base::hose(*err_code);
-      sync_error_but_do_not_emit = true; // err_code is ignored.
+      sync_error_but_do_not_emit = true; // *err_code is cleared/ignored.
       return;
     }
     // else if (!*err_code): sync_request() succeeded all the way.
@@ -1373,9 +1485,9 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
       return;
     }
     // else: Cool! We already have our side of the channel too.
-    assert(open_channel_req.m_opened_channel.initialized());
+    assert(open_channel_req->m_opened_channel.initialized());
 
-    *target_channel = std::move(open_channel_req.m_opened_channel);
+    *target_channel = std::move(open_channel_req->m_opened_channel);
 
     FLOW_LOG_INFO("Server session [" << *this << "]: Channel open active request: Succeeded in time yielding "
                   "new channel [" << *target_channel << "].");
@@ -1385,11 +1497,11 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
 
   if (sync_error_but_do_not_emit)
   {
+    // As promised, ->clear(); also failing to do this can break FLOW_ERROR_EXEC_AND_THROW_ON_ERROR():
     err_code->clear();
     return false;
   }
-  // else
-
+  // else:
   return true; // *err_code may be truthy or falsy.
 } // Server_session_impl::open_channel()
 

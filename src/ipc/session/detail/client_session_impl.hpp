@@ -922,7 +922,7 @@ private:
   mutable flow::async::Single_thread_task_loop m_async_worker;
 
   /**
-   * The session master channel.  Accessed in thread W only (not protected by mutex).
+   * The session master channel.  Accessed in thread W only.
    *   - When #m_state is NULL, this is null.
    *   - When #m_state is CONNECTING:
    *     - It is still null until transport::Native_socket_stream::sync_connect() yields a PEER-state socket.
@@ -941,6 +941,13 @@ private:
    *
    * Because it is renullified, there's the "observer" thing used in on_master_channel_error() to deal with it.
    * It's a fairly small section of code though.
+   *
+   * ### Concurrency note ###
+   * For state machine linearity/simplicity (basically -- to avoid mutex sections all over the place) ~all
+   * state is accessed from thread W (#m_async_worker) only.  This includes #m_master_channel.  That said:
+   * struc::Channel (unlike most APIs in Flow-IPC) is safe against concurrent API calls and would not
+   * require mutex protection even if accessed from multiple threads (not just thread W).  As of this writing
+   * we don't use this, but if necessary we could.
    */
   Master_structured_channel_ptr m_master_channel;
 
@@ -2284,7 +2291,16 @@ bool CLASS_CLI_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
                 "to a generous [" << round<milliseconds>(Base::S_OPEN_CHANNEL_TIMEOUT) << "].");
 
   /* As usual do all the work in thread W, where we can access m_master_channel and m_state among other things.
-   * We do need to return the results of the operation here in thread U though. */
+   * We do need to return the results of the operation here in thread U though.
+   *
+   * Maintenance note: If considering merely this open_channel() and opposing passive-open handler in
+   * Server_session_impl, there's nothing more to explain.  Below is straightforward more or less.  However consider
+   * that it's possible that *they* do *their* open_channel() to *our* passive-open handler.  Mostly that's
+   * an independent concern, but there's a non-obvious interaction between the two, and if implemented naively
+   * symmetrically on both sides, deadlock can occur.  This is explained, and handled, fully
+   * in Server_ open_channel().  The maintenance point: Any changes to this algorithm, or the us-facing
+   * counterpart, must consider the opposing equivalent -- avoiding deadlock or who knows what. */
+
   bool sync_error_but_do_not_emit = false; // If this ends up true, err_code is ignored and clear()ed ultimately.
   // If it ends up false, *err_code will indicate either success or non-fatal error.
 

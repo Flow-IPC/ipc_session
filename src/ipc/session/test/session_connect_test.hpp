@@ -53,6 +53,9 @@
  *     the documented API no-ops/sentinels are in force; everything comes alive after init_handlers().
  *   - Channel passive-open rejection: a peer constructed without a passive-open handler causes the
  *     opposing side's active open_channel() to emit the specific non-fatal error; the session survives.
+ *   - Crossing active-opens (regression test): both sides open_channel() repeatedly and concurrently,
+ *     each passive-accepted by the other; every open must succeed promptly (rather than the two sides
+ *     stalling each other until the internal timeout), and every passive side must see every channel.
  *   - A pending async_accept() aborted by Session_server destruction: its handler must fire, with the
  *     specific object-shutdown code.
  *   - Two async_accept()s outstanding concurrently, satisfied by two clients: both complete; the two
@@ -881,6 +884,171 @@ TYPED_TEST_P(Session_connect_test, Passive_open_rejected)
   pair.remove_server_persistent_bits();
 }
 
+/* Crossing active-opens: both sides open_channel() repeatedly and concurrently (one thread per side; so each
+ * session object still sees one non-const caller at a time, as the Session concept's thread-safety rules
+ * require), each open passive-accepted by the opposing side.  This is a regression test.  open_channel()
+ * is presented as synchronous and quick, but internally it awaits the opposing side's response; if that
+ * response could only be produced by a thread that is itself blocked awaiting *our* response to *their*
+ * open, two ~simultaneous opens would stall each other until the internal timeout (a minute), then both
+ * fail with the non-fatal timeout error.  The impl prevents this (Server_session_impl::open_channel()
+ * explains how); tight loops on both sides cross opens essentially every iteration, so a regression
+ * surfaces reliably as a long stall + failure rather than sporadically.
+ *
+ * Asserted: every open_channel() succeeds, and promptly (the bound is far below the internal timeout yet
+ * generous versus a healthy open, which takes milliseconds even with sanitizers); the passive side of
+ * each session sees exactly the expected number of channels; the session is intact afterwards.  A side
+ * stops looping at its first failed or slow open, so a regressed run costs about one stall, not N of them.
+ *
+ * Channel ends are not accumulated: a channel end costs on the order of 25 descriptors in this config (POSIX MQ +
+ * handles: each MQ handle alone has its MQ descriptor, 2 epoll descriptors and 2 interrupter pipes; each MQ
+ * pipe-end adds a timer pipe and a ready pipe; the socket stream adds itself and a timer pipe), and both ends
+ * live in this process; holding a few dozen channels would exhaust the default per-process descriptor limit.
+ * Each active end dies right after its open returns.  Each passive side, though, keeps its *latest* end until
+ * the next one arrives (or until the end of the test).  Reason: destroying either MQ pipe-end unlinks the MQ's
+ * name, and the passive side gets its end (and may destroy it) right after the response is sent -- so
+ * destroying it immediately races the opposing active side's attaching to that very MQ by name; losing the
+ * race yields a channel-creation error over there.  Keeping the latest end removes the race deterministically:
+ * the passive handler for open k+1 runs only after the opposing side's open_channel() for open k has returned,
+ * meaning that side has long since attached. */
+TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using Channel_obj = typename TestFixture::Channel_obj;
+  using flow::async::Single_thread_task_loop;
+  using flow::util::ostream_op_string;
+  using flow::Fine_clock;
+  using boost::chrono::seconds;
+  using boost::chrono::milliseconds;
+  using boost::chrono::round;
+  using flow::util::Mutex_non_recursive;
+  using flow::util::Lock_guard;
+  using std::atomic;
+
+  constexpr size_t N_OPENS_PER_SIDE = 20;
+  const seconds MAX_OPEN_DURATION{10}; // Versus the internal open-channel timeout: 60 s.
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("OpenCross");
+  pair.remove_server_persistent_bits(false);
+
+  // Passive-open bookkeeping per side.  The handler runs on the session's internal thread; hence shared_ptr + sync.
+  struct Passive_side
+  {
+    atomic<size_t> m_n_chans{0};
+    boost::promise<void> m_all_arrived; // Fulfilled once m_n_chans reaches N_OPENS_PER_SIDE.
+    Mutex_non_recursive m_mutex;
+    Channel_obj m_latest_chan; // Protected by m_mutex.  See the doc comment above the test for why this is kept.
+  };
+  const auto srv_passive = boost::make_shared<Passive_side>();
+  const auto cli_passive = boost::make_shared<Passive_side>();
+  const auto make_passive_handler = [](const boost::shared_ptr<Passive_side>& side)
+  {
+    return [side](Channel_obj&& new_chan, auto&& /*mdt_reader*/)
+    {
+      {
+        Lock_guard<Mutex_non_recursive> lock(side->m_mutex);
+        side->m_latest_chan = std::move(new_chan); // The previous latest end dies here.
+      }
+      if ((++side->m_n_chans) == N_OPENS_PER_SIDE)
+      {
+        side->m_all_arrived.set_value();
+      }
+    };
+  };
+
+  this->start_server(&pair);
+  Server_session srv_session;
+  const auto outcome = this->post_accept(&pair, &srv_session);
+  Client_session cli{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {},
+                     make_passive_handler(cli_passive)};
+  Error_code err_code;
+  EXPECT_TRUE(cli.sync_connect(cli.mdt_builder(), nullptr, nullptr, nullptr, &err_code));
+  EXPECT_FALSE(err_code) << "sync_connect error: [" << err_code << "] [" << err_code.message() << "].";
+  Error_code accept_err;
+  this->await_accept(outcome, &accept_err);
+  ASSERT_FALSE(accept_err) << "async_accept error: [" << accept_err << "] [" << accept_err.message() << "].";
+  srv_session.init_handlers([](const Error_code&) {}, make_passive_handler(srv_passive));
+
+  // The onslaught proper.  Each side stops at the first failed or slow open, recording why.
+  struct Active_side
+  {
+    size_t m_n_chans = 0;
+    string m_failure; // Empty if all went well.
+  };
+  const auto onslaught = [&](auto* session, Active_side* side, const string& ctx)
+  {
+    for (size_t idx = 0; idx != N_OPENS_PER_SIDE; ++idx)
+    {
+      Channel_obj chan; // Dies at iteration end.
+      Error_code chan_err;
+      const auto start = Fine_clock::now();
+      const bool ok = session->open_channel(&chan, &chan_err);
+      const auto duration = Fine_clock::now() - start;
+      if ((!ok) || chan_err || (duration > MAX_OPEN_DURATION))
+      {
+        side->m_failure = ostream_op_string(ctx, ": open #", idx, ": carried-out=[", ok, "]; error=[", chan_err,
+                                            "] [", chan_err.message(), "]; duration=[",
+                                            round<milliseconds>(duration), "].");
+        return;
+      }
+      // else
+      ++side->m_n_chans;
+    }
+  };
+
+  FLOW_LOG_INFO("Session up; both sides passive-open-capable.  Each side actively opens [" << N_OPENS_PER_SIDE << "] "
+                "channels in a tight loop, concurrently: the client on a helper thread, the server here.");
+  Active_side srv_active;
+  Active_side cli_active;
+  {
+    Single_thread_task_loop cli_thread{nullptr, "oc_cli"};
+    cli_thread.start();
+    boost::promise<void> cli_done;
+    cli_thread.post([&]()
+    {
+      onslaught(&cli, &cli_active, "cli");
+      cli_done.set_value();
+    });
+    onslaught(&srv_session, &srv_active, "srv");
+    cli_done.get_future().wait(); // Unconditional (no ASSERT bail-out until here): the task references our locals.
+  }
+
+  EXPECT_TRUE(srv_active.m_failure.empty()) << srv_active.m_failure;
+  EXPECT_TRUE(cli_active.m_failure.empty()) << cli_active.m_failure;
+  EXPECT_EQ(srv_active.m_n_chans, N_OPENS_PER_SIDE);
+  EXPECT_EQ(cli_active.m_n_chans, N_OPENS_PER_SIDE);
+
+  /* Each successful active open has a passive counterpart on the other side, delivered to the handler at
+   * some point after the response is sent; so a short wait is appropriate. */
+  const auto check_passive = [&](Passive_side* side, const string& ctx)
+  {
+    EXPECT_EQ(side->m_all_arrived.get_future().wait_for(seconds(5)), boost::future_status::ready)
+      << ctx << ": not all passive-opens arrived in time.";
+    EXPECT_EQ(side->m_n_chans.load(), N_OPENS_PER_SIDE) << ctx;
+  };
+  check_passive(srv_passive.get(), "srv");
+  check_passive(cli_passive.get(), "cli");
+
+  // No worse for wear?
+  EXPECT_FALSE(srv_session.session_token().is_nil());
+  EXPECT_EQ(srv_session.session_token(), cli.session_token());
+
+  // The remaining channel ends predecease the sessions.
+  for (auto* side : { srv_passive.get(), cli_passive.get() })
+  {
+    Lock_guard<Mutex_non_recursive> lock(side->m_mutex);
+    side->m_latest_chan = Channel_obj{};
+  }
+
+  pair.destroy_sessions(&cli, &srv_session);
+  pair.m_srv.reset();
+  pair.remove_server_persistent_bits();
+} // TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
+
 /* A pending async_accept() aborted by Session_server destruction: per the boost.asio-like contract the
  * handler must still fire -- with the specific object-shutdown code. */
 TYPED_TEST_P(Session_connect_test, Accept_abort)
@@ -1186,7 +1354,7 @@ TYPED_TEST_P(Session_connect_test, Shm_accessors)
 
 REGISTER_TYPED_TEST_SUITE_P(Session_connect_test,
                             No_server, Corrupt_cns, Stale_cns_then_retry, Rejected_identities,
-                            Config_mismatch, Almost_peer, Passive_open_rejected, Accept_abort,
+                            Config_mismatch, Almost_peer, Passive_open_rejected, Open_channel_crossing, Accept_abort,
                             Concurrent_accepts, Graceful_end_srv_initiates, Graceful_end_cli_initiates,
                             Server_knobs, Shm_accessors);
 
