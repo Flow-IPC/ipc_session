@@ -687,6 +687,16 @@ public:
    * below indicate something seriously wrong is afoot.  It would not be unreasonable to treat them as session-hosing
    * (invoke dtor).
    *
+   * @todo `Server_session::open_channel()` and `Client_session::open_channel()` both emit
+   * error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE when unable to acquire
+   * the resources (as of this writing likely MQ-related ones) underpinning the would-be channel; but
+   * server-side the actual original `Error_code` could be emitted instead.  (Client-side, due to the IPC-mechanics
+   * involved, this is less straightforward, as then: (1) it would be ambiguous as to whether it was the
+   * server-side-user-yanked-channel-immediately scenario (user's choice, not an environmental problem), or
+   * the current-RESOURCE_UNAVAILABLE scenario; and (2) transmitting an `Error_code` over IPC is a potentially
+   * subtle impl task.  Hence the to-do is probably aimed at `Server_session::open_channel()` et al, not
+   * the client-side method family.)
+   *
    * @param target_channel
    *        See above.
    * @param mdt
@@ -698,7 +708,12 @@ public:
    *        time frame),
    *        error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE (opposing or local
    *        #Server_session peer was unable to acquire resources -- as of this writing MQ-related ones -- required
-   *        for opening channel).
+   *        for opening channel),
+   *        (client-session-side only) system errors (probably a `no_such_file_or_directory` a/k/a `ENOENT`-wrapper
+   *        in Unix-likes) (explanation will be WARNING-logged, but in short: quite-probably opposing-side *user*
+   *        upon passive-open handler firing chose to immediately close the resulting `Channel`, so quickly that
+   *        open_channel() here had not yet returned and therefore could not open the `Channel`-required resources,
+   *        as of this writing MQ(s)).
    * @return See above.
    */
   bool open_channel(Channel_obj* target_channel, const Mdt_builder_ptr& mdt, Error_code* err_code = nullptr);

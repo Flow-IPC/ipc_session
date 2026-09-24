@@ -792,14 +792,10 @@ private:
    *        Non-null pointer to #Error_code; deref shall be untouched on success (and must be falsy at entry);
    *        else deref shall be set to reason for failure.  As of this writing the only possible path to failure
    *        is if #S_MQS_ENABLED, and we're unable to open an MQ handle or transport::Blob_stream_mq_sender
-   *        or transport::Blob_stream_mq_receiver to 1 of the MQs.  This is highly unlikely, since the server
-   *        was able to do it fine, but we leave it to caller to deal with the implications.
-   *
-   * @todo As of this writing the eventuality where Client_session_impl::create_channel_obj() yields an
-   * error is treated as assertion-trip-worthy by its caller; hence consider just tripping assertion inside
-   * instead and no out-arg.  For now it is left this way in case we'd want the (internal) caller to do something
-   * more graceful in the future, and in the meantime it's a decently reusable chunk of code to use in that alleged
-   * contingency.
+   *        or transport::Blob_stream_mq_receiver to 1 of the MQs.  The server was able to do it fine just
+   *        before; so the likeliest cause is the server-side *user* having destroyed their end of the channel
+   *        immediately, which unlinks the MQ name(s) before we could attach; otherwise something environmental
+   *        (out of descriptors, say).  Either way we leave it to caller to deal with the implications.
    */
   void create_channel_obj(const Shared_name& mq_name_c2s_or_none, const Shared_name& mq_name_s2c_or_none,
                           util::Native_handle&& local_hndl_or_null, Channel_obj* opened_channel_ptr,
@@ -2411,16 +2407,29 @@ bool CLASS_CLI_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
                        std::move(local_hndl_or_null), // create_channel_obj() takes responsibility for releasing it.
                        target_channel, true, // true => active.
                        err_code);
-    // *err_code is either success or failure, and target_channel is either blank or a PEER-state Channel.
+    // *err_code is either success or failure, and accordingly target_channel is either untouched or PEER-state Channel.
 
-    assert((!*err_code)
-           && "As of this writing the only path to this is inside the MQ-related guts of Channel creation (if "
-                "MQs are even configured), namely because something in Blob_stream_mq_base_impl indicates "
-                "there'd be no more than 1 MQ receiver or 1 MQ sender for a given MQ (c2s or s2c) "
-                "and that is *after* server was able to get through its side of the same thing not to mention "
-                "create the MQs in the first place.  We are not supposed to emit REJECTED_RESOURCE_UNAVAILABLE "
-                "since this isn't even resource acquisition but merely hooking up to the resource acquired "
-                "by server already.  So it is very strange no-man's-land; we abort.  @todo Reconsider.");
+    if (*err_code)
+    {
+      /* *target_channel is untouched.  The log message describes the situation.  We add this for emphasis+context:
+       * Assuming nothing environmentally terrible (like, possibly, running out of FDs/handles) happened, this
+       * happened because of *user* action on server-side, namely their immediately closing the channel downstream
+       * of their passive-open handler firing.  (There are, in this file as of this writing, other situations where
+       * create_channel_obj() fails, and we treat it as environmentally terrible/possible total meltdown.  If so,
+       * we should/probably will handle it more gracefully in those places, but they are not the same, in the
+       * sense that it wasn't cross-process user action that did it.) */
+
+      FLOW_LOG_WARNING("Client session [" << *this << "]: Channel open active request: Response received and "
+                       "indicates opposing peer (server) did open channel for us; but by the time *we* tried "
+                       "to open the required resources (MQ(s) as of this writing but could be something else over "
+                       "time), at least 1 such resource has been yanked.  The actual local error is "
+                       "[" << *err_code << "] [" << err_code->message() << "].  "
+                       "This will not hose session on our end.  Note: Usually this means user code on the "
+                       "server-side chose to immediately close the channel, so quickly that this open_channel() "
+                       "had not yet returned.");
+      return; // Note: This too is advertised as non-session-hosing.
+    }
+    // else
 
     FLOW_LOG_INFO("Client session [" << *this << "]: Channel open active request: Succeeded in time yielding "
                   "new channel [" << *target_channel << "].");
@@ -2590,7 +2599,7 @@ void CLASS_CLI_SESSION_IMPL::create_channel_obj(const Shared_name& mq_name_c2s_o
   assert(err_code_ptr);
   assert((!*err_code_ptr) && "Should start with success code.");
 
-  auto& opened_channel = *opened_channel_ptr;
+  Channel_obj opened_channel; // Let's not target *opened_channel_ptr until we've achieved success.
   const auto nickname = active_else_passive ? ostream_op_string("active", ++m_last_actively_opened_channel_id)
                                             : ostream_op_string("passive", ++m_last_passively_opened_channel_id);
 
@@ -2680,6 +2689,11 @@ void CLASS_CLI_SESSION_IMPL::create_channel_obj(const Shared_name& mq_name_c2s_o
                       Native_socket_stream{get_logger(), nickname, std::move(local_hndl_or_null)}};
     } // else if constexpr(!TRANSMIT_NATIVE_HANDLES)
   } // if constexpr(!S_MQS_ENABLED)
+
+  if (!*err_code_ptr)
+  {
+    *opened_channel_ptr = std::move(opened_channel);
+  }
 } // Client_session_impl::create_channel_obj()
 
 TEMPLATE_CLI_SESSION_IMPL

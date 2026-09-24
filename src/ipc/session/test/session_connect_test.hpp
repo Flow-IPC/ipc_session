@@ -56,6 +56,8 @@
  *   - Crossing active-opens (regression test): both sides open_channel() repeatedly and concurrently,
  *     each passive-accepted by the other; every open must succeed promptly (rather than the two sides
  *     stalling each other until the internal timeout), and every passive side must see every channel.
+ *   - Opposing (server) user closes a just-passive-opened channel immediately: the client's active open must
+ *     either succeed or fail with the non-fatal system error, never abort; the session survives.
  *   - A pending async_accept() aborted by Session_server destruction: its handler must fire, with the
  *     specific object-shutdown code.
  *   - Two async_accept()s outstanding concurrently, satisfied by two clients: both complete; the two
@@ -1064,6 +1066,101 @@ TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
   pair.remove_server_persistent_bits();
 } // TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
 
+/* The server-side user closes a just-passive-opened channel end immediately, while the client's active
+ * open_channel() is still attaching to the channel's resources.  Destroying either MQ pipe-end unlinks the MQ's
+ * name (see Blob_stream_mq_sender docs), and the server hands the end to its user right after sending the
+ * response; so the client's attach races the unlink and, on losing, cannot open the MQ.  Per contract that is a
+ * non-fatal open_channel() outcome: the call returns `true` with a system error (ENOENT on the MQ open), the
+ * session survives, and the target channel is untouched.  Winning the race is fine too: the client gets a
+ * channel whose peer end is already gone, which is the user's business.  So each open must yield exactly one of
+ * those two outcomes -- never anything else, in particular never an abort -- and the session must be intact
+ * afterwards.  The race is timing-based; how often it fires is logged for information, not asserted.  Not
+ * possible on the server side: it creates the resources itself, so a client's immediate close cannot make its
+ * open_channel() fail this way.
+ *
+ * Skipped under TSAN for the same reason as Open_channel_crossing (rapid cross-thread descriptor churn). */
+TYPED_TEST_P(Session_connect_test, Open_channel_peer_closes_immediately)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  if constexpr(flow::test::tsan_enabled())
+  {
+    GTEST_SKIP() << "Skipped under ThreadSanitizer: descriptor-number-reuse false positives; see "
+                    "Open_channel_crossing's doc comment.";
+  }
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using Channel_obj = typename TestFixture::Channel_obj;
+  using boost::system::errc::no_such_file_or_directory;
+  using std::atomic;
+
+  constexpr size_t N_OPENS = 20;
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("PeerCloses");
+  pair.remove_server_persistent_bits(false);
+
+  this->start_server(&pair);
+  Server_session srv_session;
+  const auto outcome = this->post_accept(&pair, &srv_session);
+  Client_session cli{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
+  Error_code err_code;
+  EXPECT_TRUE(cli.sync_connect(cli.mdt_builder(), nullptr, nullptr, nullptr, &err_code));
+  EXPECT_FALSE(err_code) << "sync_connect error: [" << err_code << "] [" << err_code.message() << "].";
+  Error_code accept_err;
+  this->await_accept(outcome, &accept_err);
+  ASSERT_FALSE(accept_err) << "async_accept error: [" << accept_err << "] [" << accept_err.message() << "].";
+
+  // The server's passive-open handler lets each new channel end die on the spot.  (Runs on the session's thread.)
+  const auto n_passive = boost::make_shared<atomic<size_t>>(0);
+  srv_session.init_handlers([](const Error_code&) {},
+                            [n_passive](Channel_obj&& /*new_chan*/, auto&& /*mdt_reader*/) { ++*n_passive; });
+
+  size_t n_attached = 0;
+  size_t n_yanked = 0;
+  for (size_t idx = 0; idx != N_OPENS; ++idx)
+  {
+    Channel_obj chan;
+    Error_code chan_err;
+    ASSERT_TRUE(cli.open_channel(&chan, &chan_err)) << "Open #" << idx << ": open_channel() reported not carried out.";
+    if (!chan_err)
+    {
+      ++n_attached;
+    }
+    else
+    {
+      EXPECT_TRUE(chan_err == no_such_file_or_directory)
+        << "Open #" << idx << ": expected the peer-closed-early system error; got: [" << chan_err << "] ["
+        << chan_err.message() << "].";
+      ++n_yanked;
+    }
+  }
+  FLOW_LOG_INFO("Of [" << N_OPENS << "] opens against a peer that closes immediately: [" << n_attached << "] "
+                "attached (race won), [" << n_yanked << "] refused with the peer-closed-early error (race lost).  "
+                "Either is fine.");
+
+  // No worse for wear?
+  EXPECT_FALSE(cli.session_token().is_nil());
+  EXPECT_EQ(srv_session.session_token(), cli.session_token());
+  Channel_obj chan;
+  Error_code chan_err;
+  EXPECT_TRUE(cli.open_channel(&chan, &chan_err)); // One more, for good measure: still no abort/hosing.
+  EXPECT_TRUE((!chan_err) || (chan_err == no_such_file_or_directory)) << "[" << chan_err << "].";
+  chan = Channel_obj{};
+  /* Every request reached the server and was passive-opened there.  (The server invokes its handler after sending
+   * the response, so the last invocation may trail our last open_channel() return by a moment.) */
+  for (size_t idx = 0; (idx != 500) && (n_passive->load() != (N_OPENS + 1)); ++idx)
+  {
+    flow::util::this_thread::sleep_for(boost::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(n_passive->load(), N_OPENS + 1);
+
+  pair.destroy_sessions(&cli, &srv_session);
+  pair.m_srv.reset();
+  pair.remove_server_persistent_bits();
+} // TYPED_TEST_P(Session_connect_test, Open_channel_peer_closes_immediately)
+
 /* A pending async_accept() aborted by Session_server destruction: per the boost.asio-like contract the
  * handler must still fire -- with the specific object-shutdown code. */
 TYPED_TEST_P(Session_connect_test, Accept_abort)
@@ -1369,7 +1466,8 @@ TYPED_TEST_P(Session_connect_test, Shm_accessors)
 
 REGISTER_TYPED_TEST_SUITE_P(Session_connect_test,
                             No_server, Corrupt_cns, Stale_cns_then_retry, Rejected_identities,
-                            Config_mismatch, Almost_peer, Passive_open_rejected, Open_channel_crossing, Accept_abort,
+                            Config_mismatch, Almost_peer, Passive_open_rejected, Open_channel_crossing,
+                            Open_channel_peer_closes_immediately, Accept_abort,
                             Concurrent_accepts, Graceful_end_srv_initiates, Graceful_end_cli_initiates,
                             Server_knobs, Shm_accessors);
 
