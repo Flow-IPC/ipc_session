@@ -93,6 +93,7 @@
 #include "ipc/session/error.hpp"
 #include "ipc/shm/arena_lend/arena_lend_fwd.hpp"
 #include "ipc/test/test_logger.hpp"
+#include <flow/test/test_common_util.hpp>
 #include <gtest/gtest.h>
 #include <atomic>
 #include <fstream>
@@ -909,10 +910,24 @@ TYPED_TEST_P(Session_connect_test, Passive_open_rejected)
  * destroying it immediately races the opposing active side's attaching to that very MQ by name; losing the
  * race yields a channel-creation error over there.  Keeping the latest end removes the race deterministically:
  * the passive handler for open k+1 runs only after the opposing side's open_channel() for open k has returned,
- * meaning that side has long since attached. */
+ * meaning that side has long since attached.
+ *
+ * Under TSAN the test is skipped.  It creates and destroys channel ends -- hence descriptors -- on 4 threads in
+ * quick succession, and TSAN tracks synchronization per descriptor *number*: a close() on one thread followed by
+ * the kernel handing the same number to another thread's new descriptor reads to TSAN as a data race between two
+ * unrelated objects.  Those false positives are suppressed (test/suite/unit_test/sanitize/tsan/), but clang-15's
+ * TSAN runtime crashes with an internal check failure while merely *composing* such a report, before any
+ * suppression can apply.  The regression this test guards (cross-process deadlock) has nothing to do with data
+ * races and is covered by the non-TSAN cells of any reasonable pipeline test matrix (starting with/including
+ * our GitHub-CI workflow). */
 TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
 {
   FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  if constexpr(flow::test::tsan_enabled())
+  {
+    GTEST_SKIP() << "Skipped under ThreadSanitizer: descriptor-number-reuse false positives (fatal to clang-15's "
+                    "TSAN runtime); see the test's doc comment.";
+  }
   using Pair = typename TestFixture::Pair;
   using Client_session = typename TestFixture::Client_session;
   using Server_session = typename TestFixture::Server_session;
