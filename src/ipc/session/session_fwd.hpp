@@ -214,7 +214,61 @@
  * ipc::session::shm.  Please read its doc header now before using the types directly within ipc::session.
  * That will allow you to make an informed choice.
  *
- * ### `sync_io`: integrate with `poll()`-ish event loops ###
+ * Design thoughts / Extensibility / Future work
+ * ---------------------------------------------
+ * If one looks at various Flow-IPC modules outside of ipc::session (e.g.: unstructured transport ipc::transport,
+ * structured transport ipc::transport::struc, SHM-providers SHM-classic ipc::shm::classic and SHM-jemalloc
+ * ipc::shm::arena_lend::jemalloc), one might notice a repeating pattern in the docs.  Given such a module M:
+ *   - Module M can be used independently.  (E.g, you can create a transport::Native_socket_stream and connect it
+ *     to another, without involving any other major module in Flow-IPC.  You can create/access a SHM-classic arena
+ *     by directly instantiating a shm::classic::Pool_arena across 2 processes.)
+ *   - ...However: it's easier and recommended to instead use ipc::session, which will take care of various,
+ *     practically speaking, difficult and annoying activities for you.  You'll just get your desired module-M
+ *     "thing" in ready-to-go state, so you can just use it.  (E.g., open a `Session`, and you will have N channels
+ *     already opened, each one with a connected `Native_socket_stream` inside; you specify N when opening said
+ *     `Session`.  You can open more such channels on-demand too.  You will have SHM arena(s), of specified type,
+ *     available.  All this without specifying any SHM-pool name(s), Unix-domain socket name(s), etc.)
+ *
+ * That is, of course, good.  There is something of a bird's-eye-view *design catch* to this, though.  Consider
+ * module M itself.  Typically each M is designed so that the user can, themselves, extend things within it --
+ * without touching Flow-IPC code itself.  (E.g., ipc::transport defines concepts like Blob_sender and Blob_receiver,
+ * so if you want to do low-level transport that Flow-IPC doesn't provide, you can implement them -- and then
+ * plug-in to the higher layer transport::struc, as another example, so that structured messages can travel over
+ * your new transport.)  Now to get closer to describing the aforementioned *catch*:
+ *
+ * Various modules M1, M2, ... can sometimes -- where it's natural at least -- directly plug-in to each other.
+ * (E.g., again: struc::Channel will work given any impls of the Blob_sender, Blob_receiver et al concepts, provided
+ * one passes-in instance(s) of such an impl already in PEER -- a/k/a connected -- state.)  However, in practice,
+ * for everything to work together, it's best to use ipc::session.  The *catch* is this:
+ *   - ipc::session, viewed from the point of view of a Flow-IPC *maintainer/developer*, is -- yes -- reasonably
+ *     extensible so as to support extensions to modules M1, M2, ....  (There's a hierarchy, the Session concept,
+ *     a documented internal capnp schema for channel-opening, reusable pieces; all that good stuff.)
+ *   - ...However: ipc::session, viewed from the point of view of a Flow-IPC *user* (who does not modify Flow-IPC
+ *     code itself) is *not formally extensible* so as to support extensions to modules M1, M2, ....  A user -- you --
+ *     wouldn't be able to just subclass some ipc::session classes and, boom, you can now open `Session`s that
+ *     can (e.g.) open channels with your new type of `Blob_sender`/`Blob_receiver` over some cool IPC primitive
+ *     Flow-IPC doesn't already handle.  You'd pretty much have to fork an ipc::session code-base and add to it
+ *     as needed.  So the preceding bullet would apply -- that's good; but without modifying Flow-IPC you can't
+ *     proceed -- that's (all else being equal) not as good.
+ *
+ * In short: ipc::session is reasonably extensible by adding to Flow-IPC's own ipc::session code; but it is not
+ * directly extensible by merely adding one's own `session`-y code on top.  Thus: ipc::session -- which ties
+ * together most other modules in Flow-IPC -- is not itself user-extensible at the moment, while those other modules
+ * are user-extensible.
+ *
+ * Future work can certainly tackle this, rejiggering ipc::session in such a way as to make it extensible.
+ * It is a matter of priorities.  So far, historically, the from-day-1 concept-y design of the other modules has
+ * has paid for itself; e.g., pluggability of different low-level IPC primitives makes both use and dev of Flow-IPC much
+ * more pleasant than the counterfactual; same thing w/r/t conceptual classification of SHM-providers as arena-sharing
+ * versus arena-lending (see ipc::shm doc header if interested).  ipc::session,
+ * however, is by its nature a meta-module that pulls together other modules, so making it *itself* extensible is...
+ * hmm.  Let's say it's a meta-challenge.  Designing it that way from day 1, at least for the author writing this
+ * (ygoldfel), would've involved an unreasonable amount of foreknowledge.  In short, it was too hard to predict the
+ * best way to do it.  It is easier now that all the modules M1, M2, ... exist and have been plugged in to this
+ * ecosystem; but it's still no joke.
+ *
+ * `sync_io`: integrate with `poll()`-ish event loops
+ * --------------------------------------------------
  * ipc::session APIs feature exactly the following asynchronous (blocking, background, not-non-blocking, long...)
  * operations:
  *   - ipc::session::Session on-error and (optionally) on-passive-channel-open handlers.
@@ -378,7 +432,7 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_ha
 std::ostream& operator<<(std::ostream& os, const App& val);
 
 /**
- * Prints string representation of the given `Client_appp` to the given `ostream`.
+ * Prints string representation of the given `Client_app` to the given `ostream`.
  *
  * @relatesalso Client_app
  *

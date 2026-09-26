@@ -108,7 +108,7 @@ namespace ipc::session
  *
  * ### Thread safety and handler invocation semantics ###
  * These follow the Session concept policies.
-
+ *
  * ### Error handling ###
  * Once in PEER state, error handling follows the Session concept (= Session_mv concrete class) doc header.
  * Up to that point (in NULL state) there are no public asynchronous operations; there is just sync_connect() which
@@ -257,21 +257,28 @@ public:
    *   - The location of this file is determined by Server_app contents.  Namely, Server_app::m_name, at least,
    *     is unique per Server_app in the universe, and most of the PID file's name comprises it; and
    *     its location comprises Server_app::m_kernel_persistent_run_dir_override and/or /var/run (or equivalent).
-   *   - sync_connect() reads the CNS (PID) file at that location, unique among `Server_app`s.  Now it knows
+   *   - sync_connect() reads the CNS (PID file) at that location, unique among `Server_app`s.  Now it knows
    *     "where" to connect in order to open the session; so it won't accidentally connect to some old zombie
    *     instance of the Server_app (its PID wouldn't be in the CNS file any longer) or another application entirely
    *     (its PID file would be located elsewhere and never accessed by this sync_connect()).
+   *   - Having connected, and before exchanging any session-protocol messages, sync_connect() checks the
+   *     OS-reported identity of the process at the other end against what it expected: for example its process ID must
+   *     equal the one read from the CNS (PID file); and the UID, GID, and executable path must match Server_app.
+   *     (The opposing Session_server symmetrically checks this side against its Client_app registry.)  A mismatch
+   *     fails sync_connect() with error::Code::S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS.  (This is a
+   *     safety measure -- against a stale CNS or an inconsistent IPC universe description -- not a security
+   *     one; see guided Manual page @ref safety_perms.)
    *
-   * ### What if the CNS (PID) file does not exist?  What if server is inactive? ###
+   * ### What if the CNS (PID file) does not exist?  What if server is inactive? ###
    * Then sync_connect() will quickly fail (file-not-found or connection-refused error).  Shouldn't we supply some
-   * API to await its appearance and actively listening?  Answer: Probably not.  Why? 
+   * API to await its appearance and actively listening?  Answer: Probably not.  Why?
    * Answer: Consider the situation where the PID file is there, but
    * it belongs to a now-exited instance of the Server_app; let's say it is currently suspended or restarting.
    * sync_connect() will fail then too: There is nothing listening (anymore) at the advertised PID.  So
    * it'll quickly fail (connection-refused error).  So then we'd also need an API to await an active server's
    * appearance whether or not the PID exists.  That leads to the following to-do:
    *
-   * @todo Consider adding an optional mode/feature to allow to wait through the condition wherein CNS (PID) file does
+   * @todo Consider adding an optional mode/feature to allow to wait through the condition wherein CNS (PID file) does
    * not exist, or it does but the initial session-open connect op would be refused; instead it detects these relatively
    * common conditions (server not yet up and/or is restarting and/or is operationally suspended for now, etc.) as
    * normal and waits until the condition is cleared.  Without this mode, a typical user would probably do
@@ -290,6 +297,10 @@ public:
    *        file-related system errors w/r/t reading the CNS (PID file) (see Session_server doc header for background),
    *        error::Code::S_CLIENT_NAMESPACE_STORE_BAD_FORMAT (bad CNS contents),
    *        those emitted by transport::Native_socket_stream::sync_connect(),
+   *        those returned by transport::Native_socket_stream::remote_peer_process_credentials() and
+   *        util::Process_credentials::process_invoked_as(),
+   *        error::Code::S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS (connected process is not the
+   *        configured Server_app and/or not the instance advertised in the CNS (PID file)),
    *        those emitted by transport::struc::Channel::send(),
    *        those emitted by transport::struc::Channel via on-error handler (most likely
    *        transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE indicating graceful shutdown of opposing process

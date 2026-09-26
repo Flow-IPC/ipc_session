@@ -32,8 +32,8 @@ namespace ipc::session
  * executable.  A process is an instance of an application that has begun execution at some point.
  *
  * An App is a *description* of an application, and typically used (at least after program initialization, before
- * actual IPC begins) only as supertype of Client_app and/or Server_app, it is possible that 2+ `App`s exist but
- * describe one actual application but in different roles.  2+ such `App`s must have all members equal to each
+ * actual IPC begins) only as supertype of Client_app and/or Server_app.  It is possible that 2+ `App`s exist but
+ * describe one actual application, in different roles.  2+ such `App`s must have all members equal to each
  * other respectively.  In particular see App::m_name.
  *
  * This is a data store (and a simple one).  The same holds of Client_app and Server_app.  As of this writing
@@ -70,7 +70,7 @@ namespace ipc::session
  *       (The information regarding which apps are clients, too, can be read from JSON/XML/whatever or hard-coded.)
  *   - Similarly an App that is a server in any split shall be copied-into a (separate) Server_app object,
  *     forming the 3rd and final global `*set` of applications.
- *     - For each such Server_app, save the Client::m_name of each Client_app allowed to initiate sessions
+ *     - For each such Server_app, save the App::m_name of each Client_app allowed to initiate sessions
  *       with it into its Server_app::m_allowed_client_apps.  (Again, this mapping can be read from JSON/XML/whatever
  *       or be hard-coded in some fashion.  In the end, though, it would go into `m_allowed_client_apps`.)
  *
@@ -88,7 +88,7 @@ struct App
 {
   // Types.
 
-  /// Suggested type for storing master repository or all `Apps`s.  See App doc header for discussion.
+  /// Suggested type for storing master repository of all `App`s.  See App doc header for discussion.
   using Master_set = boost::unordered_map<std::string, App>;
 
   // Data.
@@ -105,7 +105,7 @@ struct App
    *   - You want to store a set of applications fitting some criterion/a, but this is not some master repository
    *     of App objects in the first place -- rather it is referring to some subset of such a master repository.
    *     - Then, store simply a `set` or `unordered_set` (etc.) of `std::string m_name`s.
-   *       - Rationale: The basic desired operation here is an exitence-check (is application X present, based on
+   *       - Rationale: The basic desired operation here is an existence-check (is application X present, based on
    *         some definition of present?).  #m_name is by definition guaranteed to be distinct from all others.
    *         Hence storing such strings alone is sufficient and reasonably efficient while also not relying on
    *         App address uniqueness for lookup (which, while efficient, is a pain to maintain).
@@ -128,7 +128,7 @@ struct App
    * debug-friendliness/expressiveness of referring to a distinct app by its user-readable name, the lookup-by-name
    * convention felt more straightforward and convenient.  Plus, the address of an object stored in a container
    * may change while it is being built, which would add an element of brittleness.  One could also use an
-   * iterator as a key, but then the registry container would be mandated to be iteratator-stable-under-insertion,
+   * iterator as a key, but then the registry container would be mandated to be iterator-stable-under-insertion,
    * and that brings an annoying host of worries.  Indexing by string name is solid by comparison, if a bit slower.
    *
    * ### Conventions: Naming ###
@@ -172,7 +172,7 @@ struct App
    *
    * Do note that because of the "as it would appear in a command line..." requirement this indirectly restricts
    * how processes are to be invoked in this system: always via 1, absolute, lexically normal path to the executable.
-   * (Do also note this is still not necessary force an unambiguous way to invoke an application installed at
+   * (Do also note this still does not necessarily force an unambiguous way to invoke an application installed at
    * a given location: sym-links, at least, introduce an infinite number of ways to refer to the same binary.
    * That said, at least lexical normalization can be done programmatically in `fs`, and sym-link following
    * path resolution is also separately supplied by `fs`.)
@@ -193,7 +193,7 @@ struct App
  * @see `struct` App doc header.
  *
  * As of this writing a Client_app is just an App with no added stored information.  That said a Server_app
- * may exist whose App base object is equals to a Client_app `*this`'s App base object (in particular App::m_name
+ * may exist whose App base object equals a Client_app `*this`'s App base object (in particular App::m_name
  * but also all other members).
  */
 struct Client_app : public App
@@ -203,7 +203,7 @@ struct Client_app : public App
   /// Short-hand for base type.
   using Base = App;
 
-  /// Suggested type for storing master repository or all `Client_apps`s.  See App doc header for discussion.
+  /// Suggested type for storing master repository of all `Client_app`s.  See App doc header for discussion.
   using Master_set = boost::unordered_map<std::string, Client_app>;
 };
 
@@ -221,7 +221,7 @@ struct Server_app : public App
 {
   // Types.
 
-  /// Suggested type for storing master repository or all `Server_apps`s.  See App doc header for discussion.
+  /// Suggested type for storing master repository of all `Server_app`s.  See App doc header for discussion.
   using Master_set = boost::unordered_map<std::string, Server_app>;
 
   /// Short-hand for existence-checkable set of `Client_app`s via App::m_name.
@@ -264,16 +264,16 @@ struct Server_app : public App
    * identified by the UID/GID settings (matching `*this` App::m_user_id and App::m_group_id) of various
    * files and other shared resources created by the server* application in the ipc::session framework.
    * (* - Actually, at times, resources are created by the client application too.  See below.)
-   *   - File permissions set on the CNS (PID) file established by Session_server.  A given #Client_session
+   *   - File permissions set on the CNS (PID file) established by Session_server.  A given #Client_session
    *     (etc.) must read this file in order to know to which Session_server to issue a session-open request
    *     (establish a Session); if it cannot access that file, it cannot open a session against this
    *     Server_app.
    *     - If this check fails, and everything is functioning as generally intended internally, then the below
    *       items are moot (as opening a session is a prerequisite for anything else).
-   *   - Permissions set on any SHM pool created for a given `"shm::*::Server_session"`. and
-   *     `"shm::*::Session_server"`. A Client_app may not be able to complete its session-open attempt
+   *   - Permissions set on any SHM pool created for a given `"shm::*::Server_session"` and
+   *     `"shm::*::Session_server"`.  A Client_app may not be able to complete its session-open attempt
    *     (shm::classic::Client_session::sync_connect(), etc.) if its user lacks the permissions to open the
-   *     underlying SHM-pool(s) resource in the file system.(It also conceivably may be able to complete the
+   *     underlying SHM-pool(s) resource in the file system.  (It also conceivably may be able to complete the
    *     session-open but fail if opening a pool on-demand later; the session will then likely end
    *     prematurely.  This depends on the inner workings of the particular SHM system chosen;
    *     shm::classic::Client_session opens pools during session-open procedure exclusively, but other
@@ -285,7 +285,7 @@ struct Server_app : public App
    *       (ygoldfel) that nevertheless a common setting in Server_app still makes sense.  In practice, it
    *       means this: If this is set to util::Permissions_level::S_USER_ACCESS, then the Client_app and
    *       Server_app UID/GID shall need to be equal; if util::Permissions_level::S_GROUP_ACCESS then just
-   *       the GID (while UIDs ideally would be different).(Obviously if `S_UNRESTRICTED` then does not
+   *       the GID (while UIDs ideally would be different).  (Obviously if `S_UNRESTRICTED` then does not
    *       matter.)  Don't see the sense in making this a separate knob in Client_app.  Maybe though?  Not a
    *       formal to-do for now.
    *   - Similarly (to preceding bullet point, minus the `arena_lend` caveat) for bipc MQs.
@@ -295,7 +295,9 @@ struct Server_app : public App
    *
    * As of this writing the list is complete; however it is conceivable it may be analogously extended to more
    * resources.
+   *
    * @internal
+   *
    * That list is actually not quite complete even as of this writing.  The CNS (PID) file's shared-mutex
    * is also subject to this, as are other similar shared-mutexes (in Linux, semaphores).  However that's very
    * Inside Baseball to mention in public docs.

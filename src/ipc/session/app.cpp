@@ -53,6 +53,10 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
    * though we'll have to open a handle temporarily.  I've seen boost.interprocess do it fairly casually for
    * similar purposes, so why not.  The O_PATH flag (which opens the resource just for this purpose -- not for
    * I/O) is perfect for it, particularly since the resource might not be a file but a SHM pool, etc. */
+#ifndef FLOW_OS_LINUX
+  static_assert(false, "O_PATH is a Linux extension (also in some BSDs); when porting consider O_RDONLY at the cost "
+                         "of requiring read permission -- see util::set_resource_permissions() -- or fs::status().");
+#endif
 
   int native_handle = open(path.c_str(), O_PATH);
   if (native_handle == -1)
@@ -112,8 +116,9 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_ha
   else if ((stats.st_uid != app.m_user_id) || (stats.st_gid != app.m_group_id))
   {
     *err_code = error::Code::S_RESOURCE_OWNER_UNEXPECTED;
-    FLOW_LOG_WARNING("Checked ownership via descriptor/handle [" << handle << "] but encountered "
-                     "error [" << *err_code << "] [" << err_code->message() << "]; unable to check.");
+    FLOW_LOG_WARNING("Checked ownership via descriptor/handle [" << handle << "]: owner UID:GID "
+                     "[" << stats.st_uid << ':' << stats.st_gid << "] does not match App [" << app << "]; "
+                     "emitting error [" << *err_code << "] [" << err_code->message() << "].");
   }
   else
   {

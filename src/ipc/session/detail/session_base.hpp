@@ -298,7 +298,7 @@ protected:
    *
    * ### Things to consider if changing the value away from the above ###
    * - Contemplate why you're doing it.  bipc MQs are seen (in Boost source) to be a simple zero-copy data structure
-   *   in an internally maintained kernel-persistent SHM pool; while I (ygoldfel) haven't verified via kernal source,
+   *   in an internally maintained kernel-persistent SHM pool; while I (ygoldfel) haven't verified via kernel source,
    *   likely Linux POSIX MQ impl is something very similar (reasoning omitted but trust me).  So copy perf should
    *   not be a factor; only RAM use and the functional ability to transmit messages of a certain size.
    *   - If the plan is to use `transport::struc::Heap_fixed_builder`-backed for structured messages
@@ -311,7 +311,7 @@ protected:
    *   in the first place given the aforementioned `/proc/sys/...` limit for POSIX MQs).  If it *has* been
    *   released, but you can guarantee (via release process) that the client and server will always use the same ::ipc
    *   software, then you're still fine.  Just change this value; done.  (Note: A simple way to assure the opposing
-   *   peer is appropriately upgraded is to carry out a  `Protocol_negotiator` version(s) bump -- without allowing
+   *   peer is appropriately upgraded is to carry out a `Protocol_negotiator` version(s) bump -- without allowing
    *   backward-compatibility, meaning min-supported-version=max-supported-version.  There are at least a couple
    *   potential layers at which to do this bump, so just pick the right one is all.)
    */
@@ -446,7 +446,7 @@ protected:
    * from B, conversely/symmetrically.
    *
    * The problem is this: Suppose B holds a borrowed handle X (to an A-allocated object).  Now A dtor runs;
-   * its `.session_shm()` arena -- its constitutent SHM-pools! -- is destroyed.  That in itself shouldn't be
+   * its `.session_shm()` arena -- its constituent SHM-pools! -- is destroyed.  That in itself shouldn't be
    * a problem; again B presumably holds a SHM-pool handle, so it won't just disappear from RAM under it.
    * I (ygoldfel) am somewhat fuzzy on what exactly happens (not being the direct original author of SHM-jemalloc), but
    * basically as I understand it, in destroying the arena, a bunch of jemalloc deinit steps execute; perhaps
@@ -499,7 +499,7 @@ protected:
    * tight-loop operation such as the test-program hash-verifying scenario above, but generally users avoid such
    * things; and when they don't they can expect other things to get blocked, possibly in the opposing process.
    * Subjectively, weird blocking -- caused by the other side acting pathologically -- is a lot more acceptable
-   * at session-start or session-end than something like that occuring mid-session.
+   * at session-start or session-end than something like that occurring mid-session.
    *
    * So what's the exact proposal?  It's this: If A dtor begins executing, it must first block until it knows
    * B dtor has begun executing; but once it does know that, it knows that all B-held object handles have been
@@ -531,7 +531,7 @@ protected:
    * do not close it but add it to some list of such channels; they would be finally closed upon detection of
    * the other side's `Session` dtor being reached, in some background thread somewhere.  (On 2nd thought
    * this sounds a lot like Graceful_finisher -- but for this particular internal-use channel only.  The code
-   * here would only get more complex, thought maybe not too much more.  However, it would resolve the observed
+   * here would only get more complex, though maybe not too much more.  However, it would resolve the observed
    * `Session`-dtor-blocking user-visible issue, at least until the delayed-channel-death process had to exit
    * entirely.)  Beyond these basic ideas (which could even perhaps be combined) this requires some thinking;
    * it is an interesting problem.  In the meantime the dtor-cross-process-barrier-of-sorts existing solution is
@@ -577,7 +577,7 @@ protected:
    * no longer inform the user of a session-end trigger from the other side!  Left alone this way, we've broken
    * the whole system by introducing a chicken-egg paradox: We don't let our user be informed of the session-end
    * trigger when would normally, so they won't call our dtor; but because they won't call our dtor, we'll never
-   * reach the point where the channel would get hosed and we'd know the inform the user.  How to fix this?
+   * reach the point where the channel would get hosed and we'd know to inform the user.  How to fix this?
    * The answer is pretty obvious: Receiving the `GracefulSessionEnd` shall now trigger a special graceful-session-end
    * error.  Naturally this would only be usefully emitted if we're not in the dtor yet.
    * So the latter situation should kick-off the user invoking our dtor sometime soon, hopefully; we'll send our
@@ -600,11 +600,14 @@ protected:
      *   - This ctor will `.expect_msg(GRACEFUL_SESSION_END)`, so we can detect its arrival and mark it down as needed
      *     and possibly invoke `this_session->hose()` to report it to the user.
      *     Hence there's no method you'll need to call nor any setup like this needed on your part.
+     *     - That handler captures `this`; yet `*this` is typically destroyed *before* `*master_channel`.  This is
+     *       safe not by lifetime but by protocol: `GracefulSessionEnd` arrives at most once, and on_dtor_start()
+     *       returns only once it has arrived (one-shot handler spent) or the channel is hosed (no further handlers).
      *   - on_dtor_start() will attempt to send `GracefulSessionEnd` to the opposing Graceful_finisher.
      *
      * @param logger_ptr
      *        Logger to use for logging subsequently.  (Maybe `Session_base` should just subclass `Log_context`
-     *        for all os us?  Add to-do?)
+     *        for all of us?  Add to-do?)
      * @param this_session
      *        The containing Session_base.
      * @param async_worker
@@ -637,13 +640,6 @@ protected:
 
   private:
     // Data.
-
-    /**
-     * Read or written in thread W only; `false` until on_dtor_start() true body starts in thread W, `true` from
-     * that point on.  Used as a guard to avoid emitting `SESSION_FINISHED` after awaiting `GracefulSessionEnd`
-     * (if necessary) and indeed receiving it.
-     */
-    bool m_dtor_started;
 
     /// The containing Session_base.  It shall exist until `*this` is gone.
     Session_base* const m_this_session;
@@ -679,7 +675,7 @@ protected:
    * @param on_err_func
    *        On-error handler from user.
    * @param on_passive_open_channel_func_or_empty_arg
-   *        On-passive-open handler from user (empty if user wishes the disable passive-opens on this side).
+   *        On-passive-open handler from user (empty if user wishes to disable passive-opens on this side).
    */
   explicit Session_base(const Client_app& cli_app_ref, const Server_app& srv_app_ref,
                         flow::async::Task_asio_err&& on_err_func,
@@ -789,6 +785,20 @@ protected:
    */
   bool hosed() const;
 
+  /**
+   * Marks the `*_session_impl` dtor as having begun; from then on dtor_started() returns `true`, and callers
+   * shall not hose() (emit session-hosing errors to the user).  See #m_dtor_started doc header for rationale
+   * and the (essential) requirement as to when to call this: as the dtor's first act, in thread W terms.
+   * Call from thread W only, at most once.
+   */
+  void set_dtor_started();
+
+  /**
+   * Returns `true` if and only if set_dtor_started() has been called.  Call from thread W only.
+   * @return See above.
+   */
+  bool dtor_started() const;
+
 private:
   // Data.
 
@@ -837,6 +847,32 @@ private:
    * thread W only.
    */
   Error_code m_peer_state_err_code_or_ok;
+
+  /**
+   * Read/written in thread W only; `false` until the `*_session_impl` dtor -- as its first act -- posts a task
+   * calling set_dtor_started(); from then on session-hosing errors are not emitted to the user's on-error handler.
+   *
+   * ### Rationale ###
+   * Nothing can -- or tries to -- prevent the on-error handler firing *during* dtor execution in general:
+   * an async error can always lose a race against the user's decision to destroy the `Session`, and the user
+   * must be able to handle that regardless (via standard async hygiene; or by using the `sync_io` variant,
+   * where nothing fires uninvited).  However: (1) with Graceful_finisher in play, the graceful session-end
+   * protocol *reliably* delivers events -- the opposing `GracefulSessionEnd`, then the opposing side's channel
+   * closure -- while our dtor is blocked in `Graceful_finisher::on_dtor_start()`: absent this guard those would
+   * fire "errors" at the user as a deterministic part of every orderly shutdown; and (2) sans-Graceful_finisher,
+   * this shortens the coincidental-timing window as a by-product.  (1) is what drove this.  Either way an emission
+   * suppressed hereby is pointless by definition: the user, having entered the dtor, no longer benefits from any
+   * notification.
+   *
+   * ### Why one flag, here, and not one per interested party ###
+   * The interested parties are the `*_session_impl` (its hose() sites, chiefly its on-master-channel-error
+   * handler) and Graceful_finisher (its `GracefulSessionEnd` handler).  Both must observe the *same* moment as
+   * the guarantee point -- the dtor's first W-post -- or a `GracefulSessionEnd` queued in thread W between
+   * that post and any later, party-specific, flag-setting post would slip through and hose() after all.
+   * (Graceful_finisher's on_dtor_start() posts at least one task after the dtor's first post(); so that gap is a
+   * real thing.)  Hence the single flag lives here, in the class both parties can see.
+   */
+  bool m_dtor_started;
 }; // class Session_base
 
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
@@ -861,8 +897,9 @@ CLASS_SESSION_BASE::Session_base(const Client_app& cli_app_ref, const Server_app
   m_srv_app_ref(srv_app_ref), // Not copied!
   m_cli_app_ptr(&cli_app_ref), // Ditto!
   m_on_err_func(std::move(on_err_func)),
-  m_on_passive_open_channel_func_or_empty(std::move(on_passive_open_channel_func_or_empty_arg))
+  m_on_passive_open_channel_func_or_empty(std::move(on_passive_open_channel_func_or_empty_arg)),
   // m_srv_namespace and m_cli_namespace remain .empty() for now.
+  m_dtor_started(false)
 {
   // Yep.
 }
@@ -880,8 +917,9 @@ CLASS_SESSION_BASE::Session_base(const Server_app& srv_app_ref) :
   m_srv_app_ref(srv_app_ref), // Not copied!
   m_cli_app_ptr(nullptr),
   // As promised, we know our own srv-namespace:
-  m_srv_namespace(Shared_name::ct(std::to_string(util::Process_credentials::own_process_id())))
+  m_srv_namespace(Shared_name::ct(std::to_string(util::Process_credentials::own_process_id()))),
   // m_cli_namespace + m_on_err_func and m_on_passive_open_channel_func_or_empty remain .empty() for now.
+  m_dtor_started(false)
 {
   // Yep.
 }
@@ -990,6 +1028,19 @@ bool CLASS_SESSION_BASE::hosed() const
 }
 
 TEMPLATE_SESSION_BASE
+void CLASS_SESSION_BASE::set_dtor_started()
+{
+  assert((!m_dtor_started) && "By contract call at most once.");
+  m_dtor_started = true;
+}
+
+TEMPLATE_SESSION_BASE
+bool CLASS_SESSION_BASE::dtor_started() const
+{
+  return m_dtor_started;
+}
+
+TEMPLATE_SESSION_BASE
 Shared_name CLASS_SESSION_BASE::cur_ns_store_mutex_absolute_name() const
 {
   using std::to_string;
@@ -1060,7 +1111,6 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
                                                          flow::async::Single_thread_task_loop* async_worker,
                                                          Master_structured_channel* master_channel) :
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
-  m_dtor_started(false),
   m_this_session(this_session),
   m_async_worker(async_worker),
   m_master_channel(master_channel)
@@ -1088,11 +1138,14 @@ CLASS_SESSION_BASE::Graceful_finisher::Graceful_finisher(flow::log::Logger* logg
        * expect_msg() firing handler, or it would occur instead of it.  (We *do* handle the "after" case in
        * on_master_channel_hosed(), where we do indeed catch the exception.) */
 
-      if ((!m_dtor_started) && (!m_this_session->hosed()))
+      if ((!m_this_session->dtor_started()) && (!m_this_session->hosed()))
       {
         m_this_session->hose(error::Code::S_SESSION_FINISHED); // It'll log.
       }
-      /* else if (m_dtor_started): Session is already being destroyed of the user's volition; don't bug them.
+      /* else if (dtor_started()): Session is already being destroyed of the user's volition; don't bug them.
+       *   (See Session_base::m_dtor_started doc header, particularly on why we consult *that* flag, set by the
+       *   dtor's first W-post, rather than one we would set ourselves in on_dtor_start(): the latter would
+       *   leave a window between the two post()s wherein we'd still hose() -- the very thing being prevented.)
        * else if (hosed()): No need to hose if already hosed (the usual pre-condition for hose()). */
     }); // m_async_worker->post()
   }); // m_master_channel->expect_msg(GRACEFUL_SESSION_END)
@@ -1119,7 +1172,7 @@ void CLASS_SESSION_BASE::Graceful_finisher::on_dtor_start()
 {
   using flow::async::Synchronicity;
 
-  // We are in thread U.  In fact in we're in a Client/Server_session_impl dtor... but at its very start.
+  // We are in thread U.  In fact we are in a Client/Server_session_impl dtor... but at its very start.
 
   /* Thread W must be fine and running; per algorithm (see Graceful_finisher class doc header).
    * It's only safe to access m_master_channel from there. */
@@ -1127,22 +1180,22 @@ void CLASS_SESSION_BASE::Graceful_finisher::on_dtor_start()
   {
     FLOW_LOG_INFO("In Session object dtor sending GracefulSessionEnd to opposing Session object along "
                   "session master channel [" << *m_master_channel << "] -- if at all possible.");
-
-    m_dtor_started = true;
+    assert(m_this_session->dtor_started()
+           && "By contract the *_session_impl dtor posts set_dtor_started() before any Graceful_finisher task.");
 
     auto msg = m_master_channel->create_msg();
     msg.body_root()->initGracefulSessionEnd();
 
     Error_code err_code_ignored;
     m_master_channel->send(&msg, nullptr, &err_code_ignored);
-    /* Whatever happened, it logged.  We make a best effort; it channel is hosed or send fails, then the other
+    /* Whatever happened, it logged.  We make a best effort; if channel is hosed or send fails, then the other
      * side shall detect it via its on_master_channel_hosed() presumably and set its m_opposing_session_done, hence
      * its on_dtor_start() will proceed. */
   }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker->post()
 
   // That would've been non-blocking.  So now lastly:
 
-  FLOW_LOG_INFO("In Session object dtor we not await sign that the opposing Session object dtor has also started; "
+  FLOW_LOG_INFO("In Session object dtor we now await sign that the opposing Session object dtor has also started; "
                 "only then will we proceed with destroying our Session object: e.g., maybe they hold handles "
                 "to objects in a SHM-arena we would deinitialize.  If their dtor has already been called, we will "
                 "proceed immediately.  If not, we will now wait for that.  This would only block if the opposing "

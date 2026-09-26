@@ -40,14 +40,14 @@ namespace ipc::session
  *
  * Note that while in a typical (non-test/debug) scenario one would only instantiate a single
  * Session_server, that does *not* mean it cannot or should not instantiate `Client_session`s as well.
- * In a *given* split, a given application is either the server or the client; but in a different split it
+ * In a *given* split, a given application is either the server or the client; but in a different split it can
  * be the other thing.  So a Session_server handles all the splits in which this application is the
  * server; but for other splits one would instantiate 0+ `Client_session`s separately.
  *
  * ### How to use ###
  * Similarly to transport::Native_socket_stream_acceptor constructing `*this` immediately async-listens to
- * incoming connections (each an attempt to establish a opposing Client_session to partner with a new local
- * #Server_session).  async_accept() shall accept such connections, one at a time, in FIFO order (including any
+ * incoming connections (each an attempt to establish an opposing Client_session to partner with a new
+ * local #Server_session).  async_accept() shall accept such connections, one at a time, in FIFO order (including any
  * that may have queued up in the meantime, including after mere construction).  The meaning of FIFO order
  * is discussed below.
  *
@@ -69,7 +69,7 @@ namespace ipc::session
  *     of each problematic one.  In particular, log-in failures are of interest w/r/t safety + security.
  *   - Given that point, there is no reason to necessarily hose the entire IPC framework for this process (as a
  *     server) due to one badly behaving opposing client.
- *   - Is is unlikely that a Unix domain socket listener will fail, if it was able to begin listening.
+ *   - It is unlikely that a Unix domain socket listener will fail, if it was able to begin listening.
  *     So post-ctor problems are unlikely to occur strictly before the log-in exchange procedure.
  *
  * Informally there are a few ways one could deal with each given error.
@@ -83,7 +83,7 @@ namespace ipc::session
  * As of this writing I (ygoldfel) lack sufficient data in the field to make certain pronouncements.
  *
  * ### Relationship with Server_app and Client_app; relationship with file system ###
- * This class operates at quite a high level; there should be (outside of test/debug) only on of them in a process.
+ * This class operates at quite a high level; there should be (outside of test/debug) only one of them in a process.
  * There are some important relationships to understand:
  *   - This process must be invoked consistently with the description in Server_app as passed to its ctor.
  *     See Server_app (and therefore App) doc header.  In particular its App::m_exec_path, App::m_user_id,
@@ -102,7 +102,7 @@ namespace ipc::session
  *       good uniqueness properties.  This is saved in the so-called Current Namespace Store (CNS) which is
  *       simply a PID file, a fairly typical construct in Unix daemons.  Therefore:
  *       - Session_server writes this in its ctor.
- *       - The name is, as of this writing, X.pid, where X is Server_app::m_name.
+ *       - The name is, as of this writing, X.libipc-cns.pid, where X is Server_app::m_name.
  *       - The location is either a sensible default (/var/run as of this writing) or an override path
  *         Server_app::m_kernel_persistent_run_dir_override.  (Reminder: the same `Server_app`s, by value, must
  *         be registered in all processes, whether client or server or both.  Hence this override will be
@@ -127,7 +127,7 @@ namespace ipc::session
  * However: async_accept()-passed user handlers may be invoked *concurrently to each other* (if 2+ async_accept()s are
  * outstanding).  It is your responsibility, then, to ensure you do not invoke 2+ async_accept()s concurrently.
  * (One way is to only have only 1 outstanding at any given time.  Another is to post all handling on your own thread.
- * Really informally we'd say it's best to do both.)
+ * Really informally we'd say it's best to do both.  Truly: we recommend this.)
  *
  * ### Subtlety about "FIFO order" w/r/t async_accept() ###
  * Above we promise that async_accept() shall emit ready `Server_sessions`s in "FIFO" order.  The following
@@ -179,13 +179,13 @@ namespace ipc::session
  * @endinternal
  *
  * @tparam MQ_TYPE_OR_NONE
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `MQ_TYPE_OR_NONE`.
+ *         Emitted `Server_session`s shall have the concrete type based on this value for `MQ_TYPE_OR_NONE`.
  *         See #Server_session_obj.
  * @tparam TRANSMIT_NATIVE_HANDLES
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `TRANSMIT_NATIVE_HANDLES`.
+ *         Emitted `Server_session`s shall have the concrete type based on this value for `TRANSMIT_NATIVE_HANDLES`.
  *         See #Server_session_obj.
  * @tparam Mdt_payload
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `Mdt_payload`.
+ *         Emitted `Server_session`s shall have the concrete type based on this value for `Mdt_payload`.
  *         See #Server_session_obj.  In addition the same type may be used for `mdt_from_cli_or_null` (and srv->cli
  *         counterpart) in async_accept().  (Recall that you can use a capnp-`union` internally
  *         for various purposes.)
@@ -254,6 +254,11 @@ public:
    *        See `flow::Error_code` docs for error reporting semantics.  #Error_code generated:
    *        error::Code::S_INVALID_ARGUMENT (`srv_app_ref`'s, or a `cli_app_master_set_ref` member's, App::m_name
    *        violates the documented requirements; typically: contains underscore a/k/a util::Shared_name::S_SEPARATOR);
+   *        error::Code::S_RESOURCE_OWNER_UNEXPECTED (this process's effective UID or GID, or the owner of the
+   *        CNS (PID file), does not match `srv_app_ref`);
+   *        error::Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT (this process's executable path, as invoked, does not
+   *        match `srv_app_ref.m_exec_path`);
+   *        system errors from util::Process_credentials::process_invoked_as() w/r/t this process;
    *        interprocess-mutex-related errors (probably from boost.interprocess) w/r/t writing the CNS (PID file);
    *        file-related system errors w/r/t writing the CNS (PID file) (see class doc header for background);
    *        errors emitted by transport::Native_socket_stream_acceptor ctor (see that ctor's doc header; but note
@@ -307,7 +312,7 @@ public:
    * place the true on-event logic onto some task loop of your own; so ideally it would consist of essentially a
    * single `post(F)` statement of some kind.
    *
-   * You must not call this from directly within a completion handler; else undefined behavior.
+   * You may call this from directly within a completion handler (see class doc header, "Thread safety").
    *
    * #Error_code generated and passed to `on_done_func()`:
    * session::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER (destructor called, canceling all pending ops;
@@ -329,9 +334,10 @@ public:
    *
    * ### Error handling discussion ###
    * See class doc header regarding error handling, then come back here.
-   * The last 3 specific #Error_code values listed can be considered, informally, individual misbehavior on
-   * the part of the opposing client process.  While indicating potentially serious misconfiguration in the system,
-   * surely to be investigated ASAP, it is conceivable to continue attempting further `async_accept()`s.
+   * The ipc::session-specific #Error_code values listed (other than operation-aborted) can be considered,
+   * informally, individual misbehavior on the part of the opposing client process.  While indicating potentially
+   * serious misconfiguration in the system, surely to be investigated ASAP, it is conceivable to continue
+   * attempting further `async_accept()`s.
    *
    * Do note, though, that this is not a network client-server situation.  That is, probably, one should not expect
    * lots of -- or any -- such problems in a smoothly functioning IPC universe on a given production server machine.
@@ -384,7 +390,7 @@ public:
    * (internally) the log-in request from the client side:
    *   - the Client_app that wishes to open the session;
    *   - how many init-channels the client is requesting be opened (see below);
-   *   - the client->Server metadata (see below).
+   *   - the client->server metadata (see below).
    *
    * Thus supply `Mdt_load_func mdt_load_func` arg which takes all 3 of these data, plus a blank
    * capnp `Mdt_payload` structure to fill; and loads the latter as desired.
@@ -421,8 +427,8 @@ public:
    * be `->resize()`d accordingly, once (and if) `on_done_func(Error_code{})` (successful
    * connect) fires.
    *
-   * `init_channels_by_srv_cli` being null is allowed, but only if the opposing server requests 0
-   * init-channels-by-server-request.  Otherwise an error shall be emitted (see below).
+   * `init_channels_by_cli_req` being null is allowed, but only if the opposing client requests 0
+   * init-channels-by-client-request.  Otherwise an error shall be emitted (see below).
    *
    * @tparam Task_err
    *         See other async_accept() overload.
@@ -495,7 +501,7 @@ public:
    *
    * ### Thread safety ###
    * It is not safe to call it concurrently with `this->mq_msg_size_limit()` accessor or mutator.  It's not safe to call
-   * this when a `this->async_accept()` is outstanding, and either side requests init-channel(s) to opened.
+   * this when a `this->async_accept()` is outstanding, and either side requests init-channel(s) to be opened.
    * It is not safe to call this when a `*this`-spawned `Session` exists, and either this or the opposing side
    * (or both) is/are configured to allow passively-opening channels, and the other side might issue an active-open.
    *
@@ -551,7 +557,12 @@ CLASS_SESSION_SERVER::Session_server(flow::log::Logger* logger_ptr, const Server
 }
 
 TEMPLATE_SESSION_SERVER
-CLASS_SESSION_SERVER::~Session_server() = default; // It's declared at all just to document it.  Forward to base.
+CLASS_SESSION_SERVER::~Session_server()
+{
+  /* We have no state of our own for in-flight async_accept()s to reach, so the base dtor would do this just as
+   * well; but by contract (see Session_server_impl::dtor_stop_accepting()) the terminal sub-class calls it. */
+  Impl::dtor_stop_accepting();
+}
 
 TEMPLATE_SESSION_SERVER
 template<typename Task_err>
@@ -566,7 +577,7 @@ void CLASS_SESSION_SERVER::async_accept(Server_session_obj* target_session, Task
                std::move(on_done_func));
 
   /* @todo shm::classic::Session_server::async_accept() counterpart is a copy-paste of the above.
-   * shm::arena_lend::jemalloc::Session_erver::async_accept() is too.
+   * shm::arena_lend::jemalloc::Session_server::async_accept() is too.
    * Maybe the design can be amended for greater code reuse/maintainability?  This isn't *too* bad but....
    *
    * Anyway, for now, if you change this then change the aforementioned forwarding code in the other

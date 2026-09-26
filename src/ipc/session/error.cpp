@@ -141,6 +141,12 @@ std::string Category::message(int val) const // Virtual.
   case Code::S_SESSION_FINISHED:
     return "The opposing end of the session in question has been closed gracefully by the user invoking the "
            "end-session API.";
+  case Code::S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS:
+    return "Session master channel: log-in as client: server application-level process credentials (UID, etc.) "
+           "do not match the registered values and/or the OS-reported server peer values from socket stream.";
+  case Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT:
+    return "Session-server creation: this process's executable path, as invoked, does not match the registered "
+           "value; opposing session-clients would refuse to open sessions.";
 
   case Code::S_END_SENTINEL:
     assert(false && "SENTINEL: Not an error.  "
@@ -184,6 +190,10 @@ util::String_view Category::code_symbol(Code code) // Static.
     return "RESOURCE_OWNER_UNEXPECTED";
   case Code::S_SESSION_FINISHED:
     return "SESSION_FINISHED";
+  case Code::S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS:
+    return "CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS";
+  case Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT:
+    return "SERVER_APP_EXEC_PATH_INCONSISTENT";
 
   case Code::S_END_SENTINEL:
     return "END_SENTINEL";

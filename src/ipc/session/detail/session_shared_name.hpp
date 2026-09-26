@@ -25,7 +25,7 @@ namespace ipc::session
 {
 
 /* Normally we'd put these prototypes into detail/session_fwd.hpp nearby; but there are some minor subtleties
- * preventing this.  For one there's a reference to Shared_name::S_SENTINEL as a defaul arg, which means
+ * preventing this.  For one there's a reference to Shared_name::S_SENTINEL as a default arg, which means
  * #include "ipc/util/shared_name.hpp" would be needed -- not cool in a _fwd.hpp.  Secondly there's the
  * many references to Shared_name -- which session_fwd.hpp aliases to util::Shared_name -- but session_fwd.hpp
  * needs detail/session_fwd.hpp for other reasons; so this creates a circular issue.  Because of these,
@@ -164,7 +164,7 @@ bool decompose_conventional_shared_name(const Shared_name& name,
  *        (global-scope).  If null ignored.
  * @param srv_namespace_or_sentinel
  *        If not-null, pointee is set to `srv_namespace_or_sentinel` as-if given to build_conventional_shared_name()
- *        overload 2 (global-scope).  If null ignored.  This will may equal `S_SENTINEL`.
+ *        overload 2 (global-scope).  If null ignored.  This may equal `S_SENTINEL`.
  * @param the_rest
  *        If not-null, pointee is set to whatever follows the above components (even if some or all of their out-args
  *        were null), the `S_SENTINEL`, and the `S_SEPARATOR` immediately following the last of the above components.

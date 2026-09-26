@@ -109,7 +109,7 @@ Shared_name build_conventional_shared_name_prefix(const Shared_name& resource_ty
   name /= srv_app_name;
   name /= Shared_name{};
   return name;
-} // build_conventional_shared_name()
+} // build_conventional_shared_name_prefix()
 
 bool decompose_conventional_shared_name(const Shared_name& name,
                                         Shared_name* resource_type, Shared_name* srv_app_name,

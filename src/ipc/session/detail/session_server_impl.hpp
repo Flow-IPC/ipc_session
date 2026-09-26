@@ -31,6 +31,7 @@
 #include <boost/interprocess/sync/named_mutex.hpp>
 #include <boost/interprocess/sync/scoped_lock.hpp>
 #include <boost/move/make_unique.hpp>
+#include <boost/thread/condition_variable.hpp>
 
 namespace ipc::session
 {
@@ -67,14 +68,31 @@ namespace ipc::session
  * and a "surplus" queue of ready `Server_session`s to emit.  This was an option, but I (ygoldfel) felt that
  * piggy-backing handling of events directly onto the unspecified handler-invoking threads of the internally
  * used objects would produce a much simpler data structure and state machine.  (As a side effect, the behavior
- * described in "FIFO" section above occurs.  Also as a side effect, the error-emission behavior described
- * in "Error handling" above occurs.  Basically: each async_accept()'s internal handling is independent of the
- * others.  They share (almost) no state; there is no single async-chain and explicit queues unlike in various other
- * boost.asio-like classes in ::ipc.  Each async_accept() triggers async op 1, the handler for which triggers async
- * op 2, the handler for which emits the result to user.  This is
- * simpler to implement, but it also results in sensible API contract behavior, I feel.)
+ * described in the "FIFO" section of Session_server doc header occurs.  Also as a side effect, the error-emission
+ * behavior described in its "Error handling" section occurs.  Basically: each async_accept()'s internal handling is
+ * independent of the others.  They share (almost) no state; there is no single async-chain and explicit queues
+ * unlike in various other boost.asio-like classes in ::ipc.  Each async_accept() triggers async op 1, the handler
+ * for which triggers async op 2, the handler for which emits the result to user.  This is simpler to implement, but
+ * it also results in sensible API contract behavior, I feel.)
  *
- * Here is how it works.
+ * (Update: With hindsight from experience we added the following to-do.)
+ *
+ * @todo Session_server_impl (+ its subclasses, together as a whole) are internally complicated, with tricky
+ * thread interactions, hence difficult to reason about and maintain; a design wherein a `sync_io`-pattern core is
+ * adapted by an async-I/O-pattern wrapper (as done in the perf-conscious ipc::transport unstructured-IPC impls
+ * like `Native_socket_stream`) would likely be much simpler and more elegant.  Most likely this would need to
+ * be extended to `Server_session` hierarchy (heavily interacts with `_server_impl`).  (`Client_session` hierarchy
+ * would at that point pretty much have to follow at least for consistency.)  This is a major internal refactor --
+ * should not be taken lightly -- and incidentally would likely precede any attempt at the to-do elsewhere,
+ * where we endeavour to make ipc::session user-extensible.  (A bit of historical background: The internal
+ * impl of async-I/O-pattern hierachies in ipc::session preceded the very existence of the `sync_io`-pattern as
+ * an idea.  Hence writing `sync_io`-pattern adapters around the already-written async-I/O core -- e.g.,
+ * Session_server_adapter -- was more expedient than doing the reverse.  With the benefit of extra hindsight,
+ * though, we feel more strongly that (while the status quo is acceptable in and of itself), subsequent maintenance
+ * would benefit from the refactor.)  As a bonus/corollary there would be many fewer threads about per session
+ * and per server (not a real perf benefit but pretty good).
+ *
+ * Back to it: Here is how it works, to-dos notwithstanding.
  *
  * For each potential `Server_session` -- i.e., for each async_accept() -- there are 2 steps that must occur
  * asynchronously before one is ready to emit to the user-supplied handler:
@@ -108,15 +126,15 @@ namespace ipc::session
  *
  * For each async-accept request, the amassed data are independent from any other's; they are passed around
  * throughout the 2 async ops per request via lambda captures.  There is, however, one caveat to this:
- * Suppose `S->accept_log_in(F)` is invoked on not-yet-ready (incomplete) `Server_session* S`; suppose F is invoked
- * with a truthy #Error_code (it failed).  We are now sitting in thread Ws: and S should be destroyed.
+ * Suppose `S->async_accept_log_in(F)` is invoked on not-yet-ready (incomplete) `Server_session* S`; suppose F is
+ * invoked with a truthy #Error_code (it failed).  We are now sitting in thread Ws: and S should be destroyed.
  * But invoking dtor of S from within S's own handler is documented to be not-okay and results in
  * a deadlock/infinite dtor execution, or if the system can detect it, at best an abort due to a thread trying to
  * join itself.  So:
- *   - We maintain State::m_incomplete_sessions storing each such outstanding S.  If dtor runs, then all S will be
- *     auto-destroyed which will automatically invoke the user handler with operation-aborted.
+ *   - We maintain State::m_incomplete_sessions storing each such outstanding S.  If dtor runs, then
+ *     dtor_stop_accepting() destroys each S's innards, which invokes the user handler with operation-aborted.
  *   - If an incomplete (outstanding) S successfully completes log-in, we remove it from
- *     Session_server_impl::m_incomplete_sessions and emit it to user via handler.
+ *     State::m_incomplete_sessions and emit it to user via handler.
  *   - If it completes log-in with failure, we remove it from State::m_incomplete_sessions and then:
  *     - hand it off to a mostly-idle separate thread, State::m_incomplete_session_graveyard, which can run S's dtor
  *       in peace without deadlocking anyone.  (If `*this` dtor runs before then, the S dtors will still run, as each
@@ -127,10 +145,11 @@ namespace ipc::session
  * However note that State::m_incomplete_sessions is added-to in thread Wa but removed-from in various threads Ws.
  * Therefore it is protected by a mutex; simple enough.
  *
- * @todo Session_server, probably in ctor or similar, should -- for safety -- enforce the accuracy
- * of Server_app attributes including App::m_exec_path, App::m_user_id, App::m_group_id.  As of this writing
- * it enforces these things about each *opposing* Client_app and process -- so for sanity it can/should do so
- * about itself, before the sessions can begin.
+ * Shutdown is the subtle part, as threads Wa and Ws may be mid-handler when the dtor begins; and those handlers
+ * touch our state (and possibly sub-class state via the customization points).  dtor_stop_accepting() joins them
+ * all, in a safe order, before anything they touch is destroyed; and the log-in handler recognizes that it is
+ * racing it.  This shutdown stuff is indeed tricky and was ultimately the thing that cause me (ygoldfel) to
+ * add the to-do above about refactoring Session_server_impl et al around `sync_io`-pattern core(s).
  *
  * @tparam Server_session_t
  *         See #Server_session_obj.  Its API must exactly equal (or be a superset of) that of vanilla #Server_session.
@@ -306,7 +325,7 @@ protected:
   /**
    * Utility for sub-classes: ensures that `task()` is invoked near the end of `*this` dtor's execution, after *all*
    * other (mutable) state has been destroyed, including stopping/joining any threads performing
-   * async async_accept() ops.  It may be invoked at most once.
+   * async_accept() ops.  It may be invoked at most once.
    *
    * The value it adds: A long story best told by specific example.  See the original use case which is
    * in shm::classic::Session_server; it sets up certain SHM cleanup steps to occur,
@@ -324,6 +343,26 @@ protected:
    */
   template<typename Task>
   void sub_class_set_deinit_func(Task&& task);
+
+  /**
+   * Synchronously stops all async_accept() activity, the post-condition being that no internal handler -- including
+   * any invocation of the `per_app_setup_func` customization point, and anything a #Server_session_obj does during
+   * its log-in -- is executing or shall execute, and every outstanding async_accept() has fired its handler
+   * (with error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER).  Idempotent.
+   *
+   * Namely it: (1) destroys the socket-stream acceptor, joining thread Wa; (2) fences the log-in handlers off from
+   * the incomplete-sessions container, and waits out any handler already past the fence; (3) empties each
+   * incomplete session in place, joining its thread Ws, then clears the container; (4) destroys the graveyard thread
+   * and anything queued on it.
+   *
+   * ### The terminal sub-class dtor must call this, first thing ###
+   * By the time our dtor runs, the sub-class's own members have already been destroyed; yet async_accept() activity
+   * may access sub-class state -- through `per_app_setup_func` (e.g., a per-Client_app arena map and its mutex),
+   * or through this_session_srv() from inside a #Server_session_obj log-in.  Hence the terminal sub-class dtor
+   * must call dtor_stop_accepting() before its own members are destroyed, i.e., first thing.  (Our dtor asserts
+   * this; and calls it anyway, as a release-build fallback that is correct if the sub-class has no such state.)
+   */
+  void dtor_stop_accepting();
 
 private:
   // Types.
@@ -366,8 +405,45 @@ private:
    */
   struct State
   {
+    /* Ordering note: The correctness of shutdown does not rely on the declaration order below: dtor_stop_accepting()
+     * explicitly joins every thread that could touch any of this, before our dtor's `m_state.reset()` destroys it.
+     * The order is nevertheless chosen defensively per the usual rule -- anything a handler may touch is destroyed
+     * after the thread running that handler: #m_master_sock_acceptor (thread Wa) last-declared (destroyed first);
+     * then #m_incomplete_sessions (threads Ws); #m_incomplete_session_graveyard and #m_mutex et al earliest-declared
+     * (destroyed last). */
+
     /// The ID used in generating the last Server_session::cli_namespace(); so the next one = this plus 1.  0 initially.
     std::atomic<uint64_t> m_last_cli_namespace;
+
+    /**
+     * Protects `m_incomplete_sessions`, `m_stopping`, `m_n_handlers_active`.  See class doc header impl section for
+     * discussion of thread design.
+     */
+    mutable Mutex m_mutex;
+
+    /**
+     * `false` until dtor_stop_accepting() fences off the log-in handlers from #m_incomplete_sessions; `true`
+     * thereafter.  Written (once) only by dtor_stop_accepting() in thread U, under #m_mutex; read by the log-in
+     * handlers (threads Ws) under #m_mutex.  (Thread U may read it without locking, being its only writer.)
+     */
+    bool m_stopping = false;
+
+    /**
+     * The number of log-in handlers (threads Ws) that have passed the #m_stopping check (it being `false`) and
+     * erased their session from #m_incomplete_sessions but have not yet finished: they may still post to
+     * #m_incomplete_session_graveyard, log via `*this`, and invoke the user's on-done handler.  dtor_stop_accepting()
+     * waits for this to reach 0 (after setting #m_stopping, so it cannot grow).  Protected by #m_mutex.
+     */
+    unsigned int m_n_handlers_active = 0;
+
+    /// Notified whenever #m_n_handlers_active reaches 0.  Used with #m_mutex.
+    boost::condition_variable m_handlers_done;
+
+    /**
+     * Mostly-idle thread that solely destroys objects removed from `m_incomplete_sessions` in the case where a
+     * `async_accept_log_in()` failed as opposed to succeeded (in which case it is emitted to user).
+     */
+    boost::movelib::unique_ptr<flow::async::Single_thread_task_loop> m_incomplete_session_graveyard;
 
     /**
      * The set of all #Incomplete_session objects such that each one comes from a distinct async_accept() request
@@ -387,29 +463,12 @@ private:
      * Then if `*this` dtor is invoked before the aforementioned `async_accept_log_in()` handler fires, the handler
      * shall fire with operation-aborted as desired.
      *
-     * ### Ordering caveat ###
-     * As of this writing, since the dtor auto-destroys the various members as opposed to any manual ordering thereof:
-     * This must be declared before #m_master_sock_acceptor.  Then when dtor runs, first the latter's thread Wa
-     * shall be joined as it is destroyed first.  Then #m_incomplete_sessions shall be destroyed next.  Thus there
-     * is zero danger of concurrent access to #m_incomplete_sessions.  Obviously the dtor's auto-destruction
-     * of #m_incomplete_sessions is not protected by any lock.
-     *
-     * We could instead manually destroy stuff in the proper order.  I (ygoldfel) do like to just rely on
-     * auto-destruction (in order opposite to declaration/initialization) to keep things clean.
+     * See also the ordering caveat at the top of State.
      */
     Incomplete_sessions m_incomplete_sessions;
 
     /// transport::Native_socket_stream acceptor avail throughout `*this` to accept init please-open-session requests.
     boost::movelib::unique_ptr<transport::Native_socket_stream_acceptor> m_master_sock_acceptor;
-
-    /// Protects `m_incomplete_sessions`.  See class doc header impl section for discussion of thread design.
-    mutable Mutex m_mutex;
-
-    /**
-     * Mostly-idle thread that solely destroys objects removed from `m_incomplete_sessions` in the case where a
-     * `async_accept_log_in()` failed as opposed to succeeded (in which case it is emitted to user).
-     */
-    boost::movelib::unique_ptr<flow::async::Single_thread_task_loop> m_incomplete_session_graveyard;
   }; // struct State
 
   // Data.
@@ -532,10 +591,10 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      * Server_app by previous active processes before us; namely when either a Server_session or opposing Client_session
      * performs open_channel() (or pre-opens channel(s) during session creation), so the Server_session_impl
      * creates the actual `Persistent_mq_handle`s via its ctor in create-only mode.  These underlying MQs
-     * are gracefully cleaned up in Blob_stream_mq_send/receiver dtors (see their doc headers).  This cleanup point is a
-     * best-effort attempt to clean up anything that was skipped due to one or more such destructors never getting
-     * to run (due to crash, abort, etc.).  Note that Blob_stream_mq_send/receiver doc headers explicitly explain
-     * the need to worry about this contingency.
+     * are gracefully cleaned up in Blob_stream_mq_sender/receiver dtors (see their doc headers).  This cleanup point
+     * is a best-effort attempt to clean up anything that was skipped due to one or more such destructors never
+     * getting to run (due to crash, abort, etc.).  Note that Blob_stream_mq_sender/receiver doc headers explicitly
+     * explain the need to worry about this contingency.
      *
      * We simply delete everything with the Shared_name prefix used when setting up the MQs
      * (see Server_session_impl::make_channel_mqs()).  The prefix is everything up-to (not including) the PID
@@ -553,7 +612,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      * Doing it this way strikes me as cleaner code, and the combination of a crash/abort and changed software
      * "feels" fairly minor.
      *
-     * A note on stats: A stat surface for this cleanup point (and its analogs in the SHM-enabled `Session_server`
+     * A note on stats: Stats support for this cleanup point (and its analogs in the SHM-enabled `Session_server`
      * variants) has been considered and deliberately omitted: such events are rare by construction (crash
      * aftermath) and fully log-observable (per-item logging and counts inside `remove_each_persistent_*()`).
      * Longer discussion: see similar note in shm::arena_lend::jemalloc::Session_server::cleanup(). */
@@ -583,7 +642,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      * that requires, for security/safety:
      *   - Owner has the specific UID:GID registered under Server_app.  If we are who we are supposed to be,
      *     this will occur automatically as we create a resource.  Namely we have two relevant resources in here:
-     *     - CNS (PID) file.  Some reasons this could fail: if file already existed
+     *     - CNS (PID file).  Some reasons this could fail: if file already existed
      *       *and* was created by someone else; if we have the proper UID but are also in some other group or something;
      *       and lastly Server_app misconfiguration.  Mitigation: none.  For one of those we could do an owner-change
      *       call to change the group, but for now let's say it's overkill, and actually doing so might hide
@@ -603,13 +662,13 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      *         - I (ygoldfel) feel it's overkill.  I could be wrong, but it just feels insane: the mutex is only a way
      *           to access CNS file in orderly fashion without concurrency issues.  Either it works, or it doesn't
      *           work; trying to sanity-check that the right UID/GID owns it is going beyond the spirit of the design:
-     *           to make ascertain that "certain model" of trust/safety/security.  We already do that with CNS itself;
+     *           to ascertain that "certain model" of trust/safety/security.  We already do that with CNS itself;
      *           we don't need to be paranoid about the-thing-that-is-needed-to-use-CNS.
      *   - The mode is as dictated by Server_app::m_permissions_level_for_client_apps.  This we can and should
      *     ensure via a mode-set/change call.  There are subtleties about how to do that, but they're discussed
      *     near the call sites below.  As for now: We have two relevant resources in here, again:
-     *     - CNS (PID) file.  Yes, indeed, we set its permissions below.
-     *     - Associated shared mutex.  See above.  So, actually, we sets its permissions below too.  That is actually
+     *     - CNS (PID file).  Yes, indeed, we set its permissions below.
+     *     - Associated shared mutex.  See above.  So, actually, we set its permissions below too.  That is actually
      *       (though unmentioned in the design) a pretty good idea for the "certain model" in the design:
      *       If, say, it's set to unrestricted access, then any user could just acquire the lock... and block IPC
      *       from proceeding, ever, for anyone else wishing to work with that Server_app.  So, certainly,
@@ -630,7 +689,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      *
      * So let's do that stuff below. */
 
-    /* Ensure our effective user is as configured in Server_app.  We do check this value on the CNS (PID) file
+    /* Ensure our effective user is as configured in Server_app.  We do check this value on the CNS (PID file)
      * anyway; but this is still a good check because:
      *   - We might not be creating the file ourselves (first guy to get to it since boot is).
      *   - It eliminates the need (well, strong word but anyway) to keep checking that for various other
@@ -642,7 +701,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      *       the SHM-jemalloc module to be aware of the desire to even do this in the first place on every shared
      *       resource.
      *
-     * The idea is: checking it here up-front, plus checking it on the CNS (PID) file (from which all IPC naming
+     * The idea is: checking it here up-front, plus checking it on the CNS (PID file) (from which all IPC naming
      * and thus trust, per design, flows), is a nice way to take care of it ahead of all that.  It's not perfect:
      * the effective UID:GID can be changed at runtime.  We don't need to be perfect though: the whole
      * safety/security project, here, is not meant to be some kind of cryptographically powerful guarantee. */
@@ -651,14 +710,37 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
     {
       FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Creation underway.  However, just before writing "
                        "CNS (Current Namespace Store), a/k/a PID file, we determined that "
-                       "the `user` aspect of our effective credentials [" << own_creds << "] do not match "
+                       "the `user` aspect of our effective credentials [" << own_creds << "] does not match "
                        "the hard-configured value passed to this ctor: "
                        "[" << m_srv_app_ref.m_user_id << ':' << m_srv_app_ref.m_group_id << "].  "
                        "We cannot proceed, as this would violate the security/safety model of ipc::session.  "
                        "Emitting error.");
       our_err_code = error::Code::S_RESOURCE_OWNER_UNEXPECTED;
     }
-    else // if (own_creds match m_srv_app_ref.m_{user|group}_id)
+    /* Similarly ensure we were invoked as the executable Server_app says.  Every opposing Client_session checks
+     * exactly this about us (and refuses the session if it fails); so better to fail here, early and clearly, than
+     * to have every session-open fail on the client side. */
+    else if (const auto own_invoked_as = own_creds.process_invoked_as(&our_err_code);
+             our_err_code || (own_invoked_as != m_srv_app_ref.m_exec_path.string()))
+    {
+      if (our_err_code)
+      {
+        FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Creation underway.  However, just before writing "
+                         "CNS (Current Namespace Store), a/k/a PID file, we failed to query our own "
+                         "executable-invoked-as (binary name) value "
+                         "([" << our_err_code << "] [" << our_err_code.message() << "]).  Emitting error.");
+      }
+      else
+      {
+        FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Creation underway.  However, just before writing "
+                         "CNS (Current Namespace Store), a/k/a PID file, we determined that we were invoked as "
+                         "[" << own_invoked_as << "], which does not *exactly* match the hard-configured "
+                         "App::m_exec_path passed to this ctor: [" << m_srv_app_ref.m_exec_path.string() << "].  "
+                         "Every opposing Client_session would refuse to open a session with us.  Emitting error.");
+        our_err_code = error::Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT;
+      }
+    }
+    else // if (own_creds match m_srv_app_ref.m_{user|group}_id, and invoked-as matches m_exec_path)
     {
       const auto mutex_name = empty_session_base->cur_ns_store_mutex_absolute_name();
       const auto mutex_perms = util::shared_resource_permissions(m_srv_app_ref.m_permissions_level_for_client_apps);
@@ -688,7 +770,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
        * It reads the file we are about to write and locks the same inter-process mutex accordingly. */
       Named_sh_mutex_ptr sh_mutex;
       util::op_with_possible_bipc_exception(get_logger(), &our_err_code, error::Code::S_MUTEX_BIPC_MISC_LIBRARY_ERROR,
-                                            "Server_session_impl::ctor:named-mutex-open-or-create", [&]()
+                                            "Session_server_impl::ctor:named-mutex-open-or-create", [&]()
       {
         sh_mutex = make_unique<Named_sh_mutex>(util::OPEN_OR_CREATE, mutex_name.native_str(), mutex_perms);
         /* Set the permissions as discussed in long comment above. --^
@@ -702,12 +784,12 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
       {
         Sh_lock_guard sh_lock{*sh_mutex};
 
-        /* Only set permissions if we in fact create CNS (PID) file.  Since we use mutex and trust mutex's other
+        /* Only set permissions if we in fact create CNS (PID file).  Since we use mutex and trust mutex's other
          * users, we can atomically-enough check whether we create it by pre-checking its existence.  To pre-check
          * its existence use fs::exists().  fs::exists() can yield an error, but we intentionally eat any error
          * and treat it as-if file does not exist.  Whatever issue it was, if any, should get detected via ofstream
-         * opening.  Hence, if there's an error, we pre-assume we_created_cns==true, and let the chips where they
-         * may subsequently.  (Note this is all a low-probability eventuality.) */
+         * opening.  Hence, if there's an error, we pre-assume we_created_cns==true, and let the chips fall where
+         * they may subsequently.  (Note this is all a low-probability eventuality.) */
         Error_code dummy; // Can't just use fs::exists(cns_path), as it might throw an exception (not what we want).
         const bool we_created_cns = !fs::exists(cns_path, dummy);
         ofstream cns_file{cns_path};
@@ -744,7 +826,7 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
           if (!cns_file.good())
           {
             const auto sys_err_code = our_err_code = {errno, system_category()};
-            FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Could not open or write CNS (PID) file "
+            FLOW_LOG_WARNING("Session acceptor [" << *this << "]: Could not open or write CNS (PID) "
                              "file [" << cns_path << "]; system error details follow.");
             FLOW_ERROR_SYS_ERROR_LOG_WARNING(); // Log based on sys_err_code.
           }
@@ -790,19 +872,15 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
 TEMPLATE_SESSION_SERVER_IMPL
 CLASS_SESSION_SERVER_IMPL::~Session_server_impl()
 {
-  FLOW_LOG_INFO("Session acceptor [" << *this << "]: Shutting down.  The Native_socket_stream_acceptor will now "
-                "shut down, and all outstanding Native_socket_stream_acceptor handlers and Server_session "
-                "handlers shall fire with operation-aborted error codes.");
-  /* We've written our internal async-op handlers in such a way as to get those operation-aborted handler
-   * invocations to automatically occur as our various m_* are destroyed just past this line.
-   * Namely:
-   *   - m_master_sock_acceptor dtor runs: fires our handler with its operation-aborted code; we translate it
-   *     into the expected operation-aborted code; cool.  This occurs with any such pending handlers.
-   *   - m_incomplete_sessions dtor runs: Each Server_session_obj dtor runs: Any pending async_accept_log_in()
-   *     emits the expected operation-aborted code; cool.
-   *
-   * Additionally via sub_class_set_deinit_func() we allow for certain final de-init code to be executed, once
-   * all state has been destroyed (including what we just mentioned).  Hence force this to occur now: */
+  /* All async_accept() activity must be stopped already, by the terminal sub-class dtor (see dtor_stop_accepting()
+   * doc header); so no internal handler executes, and the rest of the state is idle and can be destroyed in any
+   * order.  If a sub-class forgot, we do it now (too late if in-flight activity reaches sub-class state), and
+   * complain in debug builds. */
+  assert(m_state->m_stopping && "Terminal Session_server sub-class dtor must call dtor_stop_accepting() first.");
+  dtor_stop_accepting();
+
+  /* Additionally via sub_class_set_deinit_func() we allow for certain final de-init code to be executed, once
+   * all state has been destroyed.  Hence force this to occur now: */
   m_state.reset();
 
   // Last thing!  See sub_class_set_deinit_func() doc header which will eventually lead you to a rationale comment.
@@ -815,6 +893,63 @@ CLASS_SESSION_SERVER_IMPL::~Session_server_impl()
     FLOW_LOG_TRACE("De-init work finished.");
   }
 } // Session_server_impl::~Session_server_impl()
+
+TEMPLATE_SESSION_SERVER_IMPL
+void CLASS_SESSION_SERVER_IMPL::dtor_stop_accepting()
+{
+  // We are in thread U (from a sub-class dtor, or from our own dtor).
+
+  if (m_state->m_stopping) // (We are its only writer; so no need to lock m_mutex to read it.)
+  {
+    return; // Already done.
+  }
+  // else
+
+  FLOW_LOG_INFO("Session acceptor [" << *this << "]: Shutting down.  The Native_socket_stream_acceptor will now "
+                "shut down, and all outstanding Native_socket_stream_acceptor handlers and Server_session "
+                "handlers shall fire with operation-aborted error codes.");
+
+  /* (1) Destroy the acceptor: joins thread Wa.  Any pending acceptor async-accept fires our handler with its
+   * operation-aborted code; we translate it into the expected operation-aborted code.  A handler already executing
+   * (successful socket-accept) completes first, possibly adding one more incomplete session; does not matter.
+   * (Null if ctor failed early; then nothing to do; and no async_accept() can have been called anyway.) */
+  m_state->m_master_sock_acceptor.reset();
+
+  /* (2) Fence off the log-in handlers (threads Ws) from m_incomplete_sessions.  Each handler checks m_stopping under
+   * m_mutex before touching the container.  So: any handler that did touch it did so before this point; any later
+   * one sees m_stopping and leaves it alone.  From here on we (thread U) are its only accessor; so no locking is
+   * needed below.  (Thread Wa, the only other accessor, is gone per (1).)
+   *
+   * Also wait out any handler that got in before the fence: it erased its session from m_incomplete_sessions --
+   * so (3) will not join its thread Ws -- but it may still be posting to the graveyard, logging via *this, and
+   * invoking the user's handler.  It cannot be allowed to do so after (4), let alone after we return.  (No new
+   * such handler can appear: m_stopping is now set.) */
+  {
+    Lock_guard incomplete_sessions_lock{m_state->m_mutex};
+    m_state->m_stopping = true;
+    while (m_state->m_n_handlers_active != 0)
+    {
+      m_state->m_handlers_done.wait(incomplete_sessions_lock);
+    }
+  }
+
+  /* (3) Empty each incomplete session in place: the move-assignment destroys its impl, whose dtor joins its
+   * thread Ws, first firing any pending async_accept_log_in() handler (ours) with operation-aborted.  That handler
+   * sees m_stopping and simply reports operation-aborted to the user (see it in async_accept()).  Note that the
+   * container keeps holding each session's `shared_ptr` throughout; hence the handler's own ref (from
+   * `weak_ptr::lock()`) is never the last one -- so it never destroys its session from its own thread; and it
+   * needs no graveyard. */
+  for (const auto& incomplete_session : m_state->m_incomplete_sessions)
+  {
+    *incomplete_session = Server_session_obj{};
+  }
+  // All have been replaced with inert NULL-state husks: no threads Ws left.
+
+  /* (4) Destroy the graveyard: joins its thread; anything still queued on it (sessions whose log-in failed, handed
+   * off by the handler before the end of (2)) is destroyed here, in thread U.  No thread Ws exists anymore to post
+   * onto it.  (Null if ctor failed early.) */
+  m_state->m_incomplete_session_graveyard.reset();
+} // Session_server_impl::dtor_stop_accepting()
 
 TEMPLATE_SESSION_SERVER_IMPL
 template<typename Task_err,
@@ -979,68 +1114,87 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
     {
       // We are in thread Ws (unspecified; really Server_session worker thread).
 
+      /* The Server_session_obj is alive: m_incomplete_sessions holds it until we erase it just below -- including
+       * throughout dtor_stop_accepting() (which empties it in place, keeping the `shared_ptr`, before clearing). */
       auto incomplete_session = incomplete_session_observer.lock();
-      if (incomplete_session)
+      assert(incomplete_session && "m_incomplete_sessions holds it until this handler, or shutdown, is done.");
+
+      /* Are we shutting down (dtor_stop_accepting() underway)?  If so, do not touch m_incomplete_sessions (it is
+       * being operated on by thread U, sans locking).  Else the session is no longer incomplete; either it accepted
+       * log-in OK or not.  Remove it from *this.  We'll either forget it (error) or give it to user (otherwise). */
+      bool shutting_down;
       {
-        /* No matter what -- the session is no longer incomplete; either it accepted log-in in OK or not.
-         * Remove it from *this.  We'll either forget it (error) or give it to user (otherwise).  Anyway remove it. */
+        Lock_guard incomplete_sessions_lock{m_state->m_mutex};
+        if (!(shutting_down = m_state->m_stopping))
         {
-          Lock_guard incomplete_sessions_lock{m_state->m_mutex};
 #ifndef NDEBUG
           const bool erased_ok = 1 ==
 #endif
           m_state->m_incomplete_sessions.erase(incomplete_session);
           assert(erased_ok && "Who else would have erased it?!");
-        }
 
-        if (async_err_code)
-        {
-          /* See class doc header.  We are in thread Ws; letting incomplete_session (the shared_ptr) be destroyed
-           * here (below, in the `if (async_err_code)` clause) would cause it to try
-           * to join thread Ws which would deadlock; we'd be breaking the contract to
-           * never destroy Server_session from its own handler.  So hand it off to this very-idle thread to do it
-           * asynchronously. */
-          m_state->m_incomplete_session_graveyard->post([incomplete_session = std::move(incomplete_session)]
-                                                          () mutable
-          {
-            // That's that.  ~Server_session() will run here:
-            incomplete_session.reset(); // Just in case compiler wants to warn about unused-var or optimize it away...?
-          });
-          // incomplete_session (the shared_ptr) is hosed at this point.
-          assert((!incomplete_session) && "It should've been nullified by being moved-from into the captures.");
-        } // if (async_err_code)
-      } // if (incomplete_session) (but it may have been nullified inside <=> async_err_code is truthy)
-      else // if (!incomplete_session)
+          // Register as in-flight (see m_n_handlers_active); undone by handler_done() as our very last act.
+          ++m_state->m_n_handlers_active;
+        }
+      }
+
+      if (shutting_down)
       {
-        /* Server_session_obj disappeared under us, because *this is disappearing under us.
-         * Naturally no need to remove it from any m_incomplete_sessions, since that's not a thing.
-         * However this sanity check is worthwhile: */
-        assert((async_err_code == error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER)
-               && "The incomplete-session Server_session_obj can only disappear under us if *this is destroyed "
-                    "which can only occur <=> operation-aborted is emitted due to *this destruction destroying that "
-                    "incomplete-session.");
-      } // else if (!incomplete_session)
+        /* As promised by our dtor contract: pending handlers fire with operation-aborted -- even if this log-in
+         * happened to complete (successfully or not) just as shutdown began.  *target_session is untouched.
+         * incomplete_session (our ref) is not the last one (m_incomplete_sessions still holds one), so letting it
+         * go out of scope here is fine. */
+        on_done_func(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER);
+        return;
+      }
+      // else
 
       if (async_err_code)
       {
+        /* See class doc header.  We are in thread Ws; letting incomplete_session (the shared_ptr, now the last ref)
+         * be destroyed here would cause it to try to join thread Ws which would deadlock; we'd be breaking the
+         * contract to never destroy Server_session from its own handler.  So hand it off to this very-idle thread
+         * to do it asynchronously.  (It is alive: dtor_stop_accepting() destroys it only after every thread Ws is
+         * joined.) */
+        m_state->m_incomplete_session_graveyard->post([incomplete_session = std::move(incomplete_session)]
+                                                        () mutable
+        {
+          // That's that.  ~Server_session() will run here:
+          incomplete_session.reset(); // Just in case compiler wants to warn about unused-var or optimize it away...?
+        });
+        // incomplete_session (the shared_ptr) is hosed at this point.
+        assert((!incomplete_session) && "It should've been nullified by being moved-from into the captures.");
+
         /* As in the acceptor failure case above just forward it to handler.  All the same comments apply,
          * except there is no subtlety about operation-aborted coming from outside ipc::session.
          * If you change this, please consider synchronizing with the async_accept() handler above. */
         on_done_func(async_err_code);
-        return;
       }
-      // else if (!async_err_code)
-      assert(incomplete_session);
+      else // if (!async_err_code)
+      {
+        assert(incomplete_session);
 
-      // Yay!  Give it to the user.
-      FLOW_LOG_INFO("Session acceptor [" << *this << "]: Async-accept request: Successfully resulted in logged-in "
-                    "server session [" << *incomplete_session << "].  Feeding to user via callback.");
+        // Yay!  Give it to the user.
+        FLOW_LOG_INFO("Session acceptor [" << *this << "]: Async-accept request: Successfully resulted in logged-in "
+                      "server session [" << *incomplete_session << "].  Feeding to user via callback.");
 
-      *target_session = std::move(*incomplete_session);
-      // *incomplete_session is now as-if default-cted.
+        *target_session = std::move(*incomplete_session);
+        // *incomplete_session is now as-if default-cted.
 
-      on_done_func(async_err_code); // Pass in Error_code{}.
-      FLOW_LOG_TRACE("Handler finished.");
+        on_done_func(async_err_code); // Pass in Error_code{}.
+        FLOW_LOG_TRACE("Handler finished.");
+
+        /* (incomplete_session -- our ref, now the last -- is destroyed when we return, in thread Ws.  That is fine:
+         * *incomplete_session is as-if default-cted (no impl), so its dtor joins nothing and touches nothing of
+         * ours.) */
+      } // else // if (!async_err_code)
+
+      // As the very last act of a not-shutting_down path do the following; after, `*this` may be destroyed at any time.
+      Lock_guard incomplete_sessions_lock{m_state->m_mutex};
+      if (--m_state->m_n_handlers_active == 0)
+      {
+        m_state->m_handlers_done.notify_all();
+      }
     }); // incomplete_session->async_accept_log_in()
   }); // m_master_sock_acceptor->async_accept()
 } // Session_server_impl::async_accept()

@@ -76,13 +76,13 @@ size_t n_open_fds()
 
 /* The absolute Shared_name at which m_srv_app's running Session_server accepts master-channel socket connects.
  * Mirrors Session_base::session_master_socket_stream_acceptor_absolute_name() -- same building blocks -- with the
- * srv-namespace read from the CNS (PID) file, exactly the way a real Client_session learns it. */
+ * srv-namespace read from the CNS (PID file), exactly the way a real Client_session learns it. */
 util::Shared_name master_acceptor_name(Pair& pair)
 {
   std::ifstream cns_file{pair.cns_path().string()};
   std::string srv_namespace;
   cns_file >> srv_namespace;
-  EXPECT_FALSE(srv_namespace.empty()) << "CNS (PID) file [" << pair.cns_path() << "] missing or empty; "
+  EXPECT_FALSE(srv_namespace.empty()) << "CNS (PID file) [" << pair.cns_path() << "] missing or empty; "
                                          "Session_server should have written it at construction.";
 
   auto acc_name

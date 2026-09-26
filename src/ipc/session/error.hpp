@@ -113,6 +113,18 @@ enum class Code
   /// The opposing end of the session in question has been closed gracefully by the user invoking the end-session API.
   S_SESSION_FINISHED,
 
+  /**
+   * Session master channel: log-in as client: server application-level process credentials (UID, etc.)
+   * do not match the registered values and/or the OS-reported server peer values from socket stream.
+   */
+  S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS,
+
+  /**
+   * Session-server creation: this process's executable path, as invoked, does not match the registered
+   * value; opposing session-clients would refuse to open sessions.
+   */
+  S_SERVER_APP_EXEC_PATH_INCONSISTENT,
+
   /// SENTINEL: Not an error.  This Code must never be issued by an error/success-emitting API; I/O use only.
   S_END_SENTINEL
 }; // enum class Code

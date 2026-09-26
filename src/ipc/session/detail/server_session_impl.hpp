@@ -623,9 +623,6 @@ private:
 
   // Data.
 
-  /// See Client_session_impl::m_dtor_started doc header, including the rationale; identical role here.
-  bool m_dtor_started;
-
   /**
    * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
    * the vanilla ipc::session `Session` hierarchy.
@@ -798,8 +795,6 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
   Base(srv_app_ref),
   flow::log::Log_context(logger_ptr, Log_component::S_SESSION),
 
-  m_dtor_started(false),
-
   /* Initial protocol = 1!
    * @todo This will get quite a bit more complex, especially for m_protocol_negotiator_aux,
    *       once at least one relevant protocol gains a version 2.  See class doc header for discussion. */
@@ -850,12 +845,12 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
                 "precede the above steps (it will log if so).");
 
   /* First things first: no later than now -- in thread W terms -- stop emitting session-hosing errors to
-   * the user's on-error handler.  See m_dtor_started doc header (rationale et al).  Posting order matters:
-   * this precedes any Graceful_finisher tasks below, and thread W executes in-order.
+   * the user's on-error handler.  See Session_base::m_dtor_started doc header (rationale et al).  Posting order
+   * matters: this precedes any Graceful_finisher tasks below, and thread W executes in-order.
    *
    * Reiterating here though: Nothing can and this won't prevent handler firing during dtor altogether; it
    * might be happening already.  Said doc header explains why we still prevent it from this point on. */
-  m_async_worker.post([this]() { m_dtor_started = true; });
+  m_async_worker.post([this]() { Base::set_dtor_started(); });
 
   if constexpr(S_GRACEFUL_FINISH_REQUIRED)
   {
@@ -1049,12 +1044,12 @@ bool CLASS_SRV_SESSION_IMPL::init_handlers_impl
                       "It is hard to imagine what it could be, but it is not known to be a bug or problem.  "
                       "It is interesting enough for INFO log level though.  Recommend investigation.");
       }
-      else if (!m_dtor_started)
+      else if (!Base::dtor_started())
       {
         Base::hose(m_pre_init_err_code);
       }
-      /* else if (m_dtor_started): The dtor has begun in the async-gap since init_handlers(); the user
-       * no longer benefits from any notification.  See m_dtor_started doc header. */
+      /* else if (dtor_started()): The dtor has begun in the async-gap since init_handlers(); the user
+       * no longer benefits from any notification.  See Session_base::m_dtor_started doc header. */
     });
     return true;
   }
@@ -1599,7 +1594,7 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_open_channel_req
     FLOW_LOG_WARNING("Server session [" << *this << "]: Passive open-channel: send() of OpenChannelToServerRsp "
                      "failed (details above presumably); this hoses the session.  Emitting to user handler "
                      "(unless dtor has begun).");
-    if (!m_dtor_started) // (See its doc header for rationale.)
+    if (!Base::dtor_started()) // (See Session_base::m_dtor_started doc header for rationale.)
     {
       Base::hose(err_code);
     }
@@ -2501,11 +2496,11 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_error(const Error_code& err_code)
   }
   // else if (handlers_are_set()): We are in PEER state.  Here the logic is similar to Client_session_impl again:
 
-  if ((!m_dtor_started) && (!Base::hosed()))
+  if ((!Base::dtor_started()) && (!Base::hosed()))
   {
     Base::hose(err_code);
   }
-  /* else if (m_dtor_started): Session is already being destroyed of the user's volition; don't bug them.
+  /* else if (dtor_started()): Session is already being destroyed of the user's volition; don't bug them.
    * else if (hosed()): No need to hose if already hosed (the usual pre-condition for hose()). */
 
   if constexpr(S_GRACEFUL_FINISH_REQUIRED)

@@ -32,10 +32,10 @@
  * (elsewhere and incidentally by this file's own scaffolding).
  *
  * What is covered here so far:
- *   - Connect attempted when no server has ever run: there is no CNS (PID) file to read.  The client must
+ *   - Connect attempted when no server has ever run: there is no CNS (PID file) to read.  The client must
  *     fail gracefully with the OS's file-not-found error; and the same Client_session object must then be
  *     usable to connect successfully, once a server does run.
- *   - Connect against a corrupt CNS (PID) file: each of the two malformed-contents paths (no
+ *   - Connect against a corrupt CNS (PID file): each of the two malformed-contents paths (no
  *     newline-terminated first line; line is not a number) must yield CLIENT_NAMESPACE_STORE_BAD_FORMAT.
  *   - The stale-CNS scenario: a server ran and is gone; the CNS file remains (in production nothing deletes
  *     it -- on purpose -- the next server instance overwrites it in place); a client connect therefore
@@ -538,7 +538,7 @@ protected:
 
 TYPED_TEST_SUITE_P(Session_connect_test);
 
-/* No server has ever run: no CNS (PID) file exists.  Connect must fail with the OS file-not-found error;
+/* No server has ever run: no CNS (PID file) exists.  Connect must fail with the OS file-not-found error;
  * and the failure must leave the Client_session object reusable: once a server is up, the same object
  * connects successfully. */
 TYPED_TEST_P(Session_connect_test, No_server)
@@ -556,7 +556,7 @@ TYPED_TEST_P(Session_connect_test, No_server)
 
   Client_session cli{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
 
-  FLOW_LOG_INFO("Connect attempt with no server ever having run (hence no CNS (PID) file).");
+  FLOW_LOG_INFO("Connect attempt with no server ever having run (hence no CNS (PID file)).");
   Error_code err_code;
   const bool ok = cli.sync_connect(cli.mdt_builder(), nullptr, nullptr, nullptr, &err_code);
   EXPECT_TRUE(ok);
@@ -573,7 +573,7 @@ TYPED_TEST_P(Session_connect_test, No_server)
   pair.remove_server_persistent_bits();
 }
 
-/* The CNS (PID) file exists but is corrupt.  Each of the two malformed-contents code paths must yield
+/* The CNS (PID file) exists but is corrupt.  Each of the two malformed-contents code paths must yield
  * CLIENT_NAMESPACE_STORE_BAD_FORMAT: contents that are a line but not a number; contents lacking a
  * newline-terminated line at all.  (No server is involved: the client bails before any socket work.) */
 TYPED_TEST_P(Session_connect_test, Corrupt_cns)
@@ -605,7 +605,7 @@ TYPED_TEST_P(Session_connect_test, Corrupt_cns)
          "[" << err_code.message() << "].";
   };
 
-  FLOW_LOG_INFO("Connect attempts against corrupt CNS (PID) file [" << cns_path << "]: 2 corruption sorts.");
+  FLOW_LOG_INFO("Connect attempts against corrupt CNS (PID file) [" << cns_path << "]: 2 corruption sorts.");
   connect_expecting_bad_format("notanumber\n"); // Proper line; does not parse as a PID.
   connect_expecting_bad_format("12345"); // Would parse fine; but no newline-terminated line = not proper.
 
@@ -615,7 +615,7 @@ TYPED_TEST_P(Session_connect_test, Corrupt_cns)
 }
 
 /* The stale-CNS scenario -- in production terms: server instance 1 ran and is gone (cleanly or not: for
- * a client the observable is the same); the CNS (PID) file remains -- nothing ever deletes it, on purpose;
+ * a client the observable is the same); the CNS (PID file) remains -- nothing ever deletes it, on purpose;
  * each successive server instance overwrites it in place.  A client connect during the between-servers
  * window reads the CNS fine but cannot reach the dead instance's socket-acceptor.  Once server instance 2
  * is up, a retry -- by the *same* Client_session object -- must succeed.
