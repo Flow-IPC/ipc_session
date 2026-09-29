@@ -71,7 +71,7 @@ namespace ipc::session
  *   - Behavior when the destructor is invoked.  See ~Session() doc header.
  *   - Default ctor (which creates a NULL-state object that can be moved-to and to which "as-if"
  *     state any moved-from object is changed).
- *   - Move ctor, move assigment operator; these do the reasonable thing including setting the moved-from object
+ *   - Move ctor, move assignment operator; these do the reasonable thing including setting the moved-from object
  *     to NULL state.  Various satellite APIs (e.g., Session_server) may
  *     need these.  That is such APIs do not rely on the factory/shared-ownership pattern.
  *
@@ -131,7 +131,7 @@ namespace ipc::session
  * open_channel() is used to initiate a channel opening on one side, and the on-passive-open handler is used
  * to accept the same on the other side (for a given channel).  The result, on each side, is a #Channel_obj,
  * which is a `Channel` template instantiation.  Note that it is not a `struc::Channel`; the user may choose
- * to immediate convert `Channel` to `struc::Channel` via `std::move()`, but whether they want to or not is up
+ * to immediately convert `Channel` to `struc::Channel` via `std::move()`, but whether they want to or not is up
  * to them and their desired use case.  Now, there are millions of patterns of what the acceptor might want
  * to accept in a session; there could be one channel for some app-wide updates and one per processor core;
  * and possibly more differentiation than that regarding which channel is for what purpose.  Meanwhile the only
@@ -223,7 +223,7 @@ public:
    * instance of this type -- in PEER state.  The concept does not specify how the concrete Channel instance type --
    * meaning the template params to `Channel` -- is determined.  In practice it is likely to be controlled by
    * unspecified compile-time knobs, likely additional template params, to the particular Session impl.
-   * E.g., see Client_session:S_MQS_ENABLED.
+   * E.g., see Session_mv::S_MQS_ENABLED.
    *
    * In practice a user is likely to declare `Channel` variables by using this alias (or via `auto`).
    *
@@ -488,7 +488,7 @@ public:
    * or nil if in NULL state, or if `*this` session is hosed from a prior error.
    *
    * Informal context: Firstly see transport::struc::Channel::session_token() and class template doc header.
-   * However note that open_channel() (active-open) and on-passive-open handler yields an unstructured, unused
+   * However note that open_channel() (active-open) and on-passive-open handler yield an unstructured, unused
    * #Channel_obj: it is entirely optional that the user then upgrade it to a `struc::Channel`.  *If* one
    * does so, however, then a non-nil session-token shall be *required* and, for safety, must equal
    * what this session_token() returns.
@@ -512,8 +512,8 @@ public:
    * The returned pointer is stable through `*this` dtor.  Among other things the Info_collector is directly
    * printable via `ostream <<`: the whole stats bundle in one output.
    *
-   * Before PEER state returns the impl is free to return null or a non-empty #Info_collector.  (Rationale: the
-   * proper behavior depends on what the `Session` goes through before entry to PEER state.)
+   * Before PEER state the impl is free to return null or non-null.  (Rationale: the proper behavior depends on
+   * what the `Session` goes through before entry to PEER state.)
    *
    * @see e.g., Session_mv::info_collector(), part of the core API of the main Flow-IPC `Session` impl.
    *
@@ -611,7 +611,7 @@ public:
    *
    * @note Same note as in #Structured_channel doc header.
    */
-  using Structured_msg_reader_config = typename Impl::Structured_msg_builder_config;
+  using Structured_msg_reader_config = typename Impl::Structured_msg_reader_config;
 
   /// Implements Session API per contract.
   using Info_collector = typename Impl::Info_collector;
@@ -653,7 +653,7 @@ public:
    */
   Session_mv(Session_mv&& src);
 
-  /// Copy ction is disallowed.
+  /// Copy construction is disallowed.
   Session_mv(const Session_mv&) = delete;
 
   /// Implements Session API per contract.
@@ -791,7 +791,7 @@ public:
   flow::log::Logger* get_logger() const;
 
   /**
-   * Returns log component.
+   * Returns log component.  Works even if `*this` is as-if default-cted.
    * @return See above.
    */
   const flow::log::Component& get_log_component() const;
@@ -940,13 +940,16 @@ transport::struc::Heap_reader::Config
 TEMPLATE_SESSION_MV
 flow::log::Logger* CLASS_SESSION_MV::get_logger() const
 {
-  return impl()->get_logger();
+  return impl() ? impl()->get_logger() : nullptr;
 }
 
 TEMPLATE_SESSION_MV
 const flow::log::Component& CLASS_SESSION_MV::get_log_component() const
 {
-  return impl()->get_log_component();
+  /* Every impl() uses this component (see Session_base ctor et al); so no need to consult impl() -- which, if we are
+   * as-if-default-cted, is null anyway.  A little cheesy, but we'll live. */
+  static const flow::log::Component S_COMPONENT{Log_component::S_SESSION};
+  return S_COMPONENT;
 }
 
 TEMPLATE_SESSION_MV

@@ -52,7 +52,7 @@ namespace ipc::session::sync_io
  *     - (Optional -- if you want to enable channel passive-open): Channel passive-open handler
  *       (though it will be invoked via... ditto).
  *   - Set up `sync_io` pattern using start_ops() (and if needed precede it with replace_event_wait_handles()).
- *   - Use `core->sync_connect()` in identical fashion to async-I/O `Client_session`.
+ *   - Use `core()->sync_connect()` in identical fashion to async-I/O `Client_session`.
  *   - On successful connect:
  *     - Be ready for error handler to fire (in `sync_io` style).
  *     - Be ready for passive-channel-open handler to fire (in `sync_io` style).
@@ -70,14 +70,14 @@ namespace ipc::session::sync_io
  * sync_io::Client_session_adapter.
  *
  * @todo Make all of Server_session_adapter, Client_session_adapter move-ctible/assignable like their adapted
- * counterparts.  It is not of utmost importance practically, unlike for the adapter guys, but at least for
+ * counterparts.  It is not of utmost importance practically, unlike for the adapted guys, but at least for
  * consistency it would be good; and of course it never hurts usability even if not critical.
  * (Internally: This is not difficult to implement; the async-I/O guys being movable was really the hard part.)
  *
  * @tparam Session
  *         The async-I/O `Client_session` concrete type being adapted.  As of this writing that would be one of
  *         at least: `session::Client_session<knobs>`, `session::shm::classic::Client_session<knobs>`,
- *         `session::shm::jemalloc::Client_session<knobs>`.
+ *         `session::shm::arena_lend::jemalloc::Client_session<knobs>`.
  */
 template<typename Session>
 class Client_session_adapter :
@@ -187,7 +187,7 @@ template<typename Event_wait_func_t>
 bool Client_session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
 {
   return Base::start_ops(std::move(ev_wait_func));
-} // Session_adapter::start_ops()
+}
 
 template<typename Session>
 template<typename Create_ev_wait_hndl_func>

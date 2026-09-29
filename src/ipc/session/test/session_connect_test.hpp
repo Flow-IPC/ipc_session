@@ -47,21 +47,30 @@
  *     allowed Client_app but registered (server-side) with a wrong UID or a wrong executable path.
  *     The server must emit the specific applicable error to its accept handler, tell the rejected
  *     client nothing specific (by design), and remain fully operational for a subsequent proper client.
+ *   - The server's own identity self-check at construction: a Server_app with a wrong UID, or a wrong (or
+ *     merely differently spelled) executable path, must fail the Session_server ctor with the specific code --
+ *     via out-arg, or exception in the throwing form; the failed object's dtor must be harmless.
  *   - Compile-time session-config mismatch between the two sides (e.g., differing MQ-type template
  *     parameter): rejected similarly to the above.
  *   - The almost-PEER state of a freshly-accepted Server_session (init_handlers() not yet called):
  *     the documented API no-ops/sentinels are in force; everything comes alive after init_handlers().
+ *   - NULL state (default-cted or moved-from session objects, both sides): the Session-concept sentinels; plus
+ *     get_logger() null and get_log_component() usable, with no impl inside.
  *   - Channel passive-open rejection: a peer constructed without a passive-open handler causes the
  *     opposing side's active open_channel() to emit the specific non-fatal error; the session survives.
  *   - Crossing active-opens (regression test): both sides open_channel() repeatedly and concurrently,
  *     each passive-accepted by the other; every open must succeed promptly (rather than the two sides
  *     stalling each other until the internal timeout), and every passive side must see every channel.
- *   - Opposing (server) user closes a just-passive-opened channel immediately: the client's active open must
- *     either succeed or fail with the non-fatal system error, never abort; the session survives.
+ *   - Opposing user closes a just-passive-opened channel immediately -- in each direction (server user closes,
+ *     client opens; and mirrored): the active open must either succeed or fail with the non-fatal system error,
+ *     never abort; the session survives.
  *   - A pending async_accept() aborted by Session_server destruction: its handler must fire, with the
  *     specific object-shutdown code.
  *   - Two async_accept()s outstanding concurrently, satisfied by two clients: both complete; the two
  *     resulting sessions coexist and are correctly paired.
+ *   - The `sync_io`-pattern server-side adapters' API-misuse guards (Session_server_adapter::async_accept(),
+ *     Server_session_adapter::init_handlers()): each misuse -- before start_ops(); on a not-yet-accepted session;
+ *     duplicate; after the session error -- is refused with no residue, and the proper sequence then works.
  *   - The graceful session-end choreography, in each direction (server-side session destroyed first;
  *     client-side first): the observing side's error handler fires exactly once -- for SHM-jemalloc
  *     with the specific SESSION_FINISHED code -- while the initiating side's handler never fires; the
@@ -93,6 +102,7 @@
 #include "ipc/transport/posix_mq_handle.hpp"
 #include "ipc/transport/bipc_mq_handle.hpp"
 #include "ipc/session/error.hpp"
+#include "ipc/session/sync_io/session_server_adapter.hpp"
 #include "ipc/shm/arena_lend/arena_lend_fwd.hpp"
 #include "ipc/test/test_logger.hpp"
 #include <flow/test/test_common_util.hpp>
@@ -531,6 +541,120 @@ public:
     pair.remove_server_persistent_bits();
   } // run_graceful_end()
 
+  /* The opposing (passive) side's user closes each just-passive-opened channel end immediately, while the active
+   * side's open_channel() may still be attaching to the channel's resources.  `srv_opens` selects the direction:
+   * the server actively opens (and the client's user closes) or vice versa.
+   *
+   * The race: destroying either MQ pipe-end unlinks the MQ's name (see Blob_stream_mq_sender docs), and the passive
+   * side hands the end to its user right after sending the response.  When the client is the active side, its
+   * attach races that unlink and, on losing, cannot open the MQ.  Per contract that is a non-fatal open_channel()
+   * outcome: the call returns `true` with a system error (ENOENT on the MQ open), the session survives, and the
+   * target channel is untouched.  Winning the race is fine too: the active side gets a channel whose peer end is
+   * already gone, which is the user's business.  When the server is the active side there is no such race today:
+   * it creates the resources itself, before its request goes out.  We deliberately do not rely on that
+   * impl-level fact: both directions are held to the same outcomes.
+   *
+   * Asserted: each open yields exactly one of those two outcomes -- never anything else, in particular never an
+   * abort; every request reaches the passive side's handler; the session is intact afterwards.  How often the race
+   * is lost is logged for information, not asserted.
+   *
+   * Skipped under TSAN for the same reason as Open_channel_crossing (rapid cross-thread descriptor churn). */
+  void run_peer_closes_immediately(bool srv_opens)
+  {
+    using boost::system::errc::no_such_file_or_directory;
+    using std::atomic;
+
+    if constexpr(flow::test::tsan_enabled())
+    {
+      GTEST_SKIP() << "Skipped under ThreadSanitizer: descriptor-number-reuse false positives; see "
+                      "Open_channel_crossing's doc comment.";
+    }
+
+    constexpr size_t N_OPENS = 20;
+    const string active_side = srv_opens ? "server" : "client";
+
+    const auto pair_ptr = boost::make_shared<Pair>();
+    auto& pair = *pair_ptr;
+    pair.populate_apps(srv_opens ? "PeerClosesS" : "PeerClosesC");
+    pair.remove_server_persistent_bits(false);
+
+    // The passive side's handler lets each new channel end die on the spot.  (Runs on that session's thread.)
+    const auto n_passive = boost::make_shared<atomic<size_t>>(0);
+    const auto on_passive_open = [n_passive](Channel_obj&& /*new_chan*/, auto&& /*mdt_reader*/) { ++*n_passive; };
+
+    // Only the passive side gets a passive-open handler.
+    start_server(&pair);
+    Server_session srv_session;
+    const auto outcome = post_accept(&pair, &srv_session);
+    auto cli = srv_opens
+                 ? Client_session{ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {},
+                                  on_passive_open}
+                 : Client_session{ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
+    Error_code err_code;
+    EXPECT_TRUE(cli.sync_connect(cli.mdt_builder(), nullptr, nullptr, nullptr, &err_code));
+    EXPECT_FALSE(err_code) << "sync_connect error: [" << err_code << "] [" << err_code.message() << "].";
+    Error_code accept_err;
+    await_accept(outcome, &accept_err);
+    ASSERT_FALSE(accept_err) << "async_accept error: [" << accept_err << "] [" << accept_err.message() << "].";
+    if (srv_opens)
+    {
+      srv_session.init_handlers([](const Error_code&) {});
+    }
+    else
+    {
+      srv_session.init_handlers([](const Error_code&) {}, on_passive_open);
+    }
+
+    const auto open_one = [&](Channel_obj* chan, Error_code* chan_err) -> bool
+    {
+      return srv_opens ? srv_session.open_channel(chan, chan_err) : cli.open_channel(chan, chan_err);
+    };
+
+    size_t n_attached = 0;
+    size_t n_yanked = 0;
+    for (size_t idx = 0; idx != N_OPENS; ++idx)
+    {
+      Channel_obj chan;
+      Error_code chan_err;
+      ASSERT_TRUE(open_one(&chan, &chan_err))
+        << "Open #" << idx << " by [" << active_side << "]: open_channel() reported not carried out.";
+      if (!chan_err)
+      {
+        ++n_attached;
+      }
+      else
+      {
+        EXPECT_TRUE(chan_err == no_such_file_or_directory)
+          << "Open #" << idx << " by [" << active_side << "]: expected the peer-closed-early system error; got: "
+             "[" << chan_err << "] [" << chan_err.message() << "].";
+        ++n_yanked;
+      }
+    }
+    FLOW_LOG_INFO("Of [" << N_OPENS << "] opens by the [" << active_side << "] against a peer that closes "
+                  "immediately: [" << n_attached << "] attached (race won), [" << n_yanked << "] refused with the "
+                  "peer-closed-early error (race lost).  Either is fine.");
+
+    // No worse for wear?
+    EXPECT_FALSE(cli.session_token().is_nil());
+    EXPECT_EQ(srv_session.session_token(), cli.session_token());
+    Channel_obj chan;
+    Error_code chan_err;
+    EXPECT_TRUE(open_one(&chan, &chan_err)); // One more, for good measure: still no abort/hosing.
+    EXPECT_TRUE((!chan_err) || (chan_err == no_such_file_or_directory)) << "[" << chan_err << "].";
+    chan = Channel_obj{};
+    /* Every request reached the passive side and was passive-opened there.  (It invokes its handler after sending
+     * the response, so the last invocation may trail our last open_channel() return by a moment.) */
+    for (size_t idx = 0; (idx != 500) && (n_passive->load() != (N_OPENS + 1)); ++idx)
+    {
+      flow::util::this_thread::sleep_for(boost::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(n_passive->load(), N_OPENS + 1);
+
+    pair.destroy_sessions(&cli, &srv_session);
+    pair.m_srv.reset();
+    pair.remove_server_persistent_bits();
+  } // run_peer_closes_immediately()
+
 protected:
   // For the test's own narration (INFO); also the optional ipc_logger() target.
   Test_logger m_test_logger{Sev::S_INFO};
@@ -758,6 +882,81 @@ TYPED_TEST_P(Session_connect_test, Rejected_identities)
   pair.remove_server_persistent_bits();
 }
 
+/* The server's own identity self-check at construction: the Server_app handed to the Session_server ctor
+ * must describe the actual process, or the ctor fails -- before creating anything kernel-persistent -- with
+ * the specific code.  (Every opposing client checks the same things about the server and would refuse every
+ * session; the self-check makes the misconfiguration fail early and clearly instead.)  Sub-cases, each
+ * Server_app differing from the truthful one in one aspect:
+ *   - Wrong UID: RESOURCE_OWNER_UNEXPECTED.
+ *   - Wrong executable path: SERVER_APP_EXEC_PATH_INCONSISTENT.
+ *   - The same binary, but its path spelled differently (an extra `.` component): ditto -- the documented
+ *     match is exact, not by file identity.
+ *   - Wrong executable path again, but via the throwing ctor form: Runtime_error carrying that code.
+ * In each case the failed object's destruction must be harmless.  Lastly a server built off the truthful
+ * Server_app works: a client connects. */
+TYPED_TEST_P(Session_connect_test, Server_self_check)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Session_server = typename TestFixture::Session_server;
+  using Server_session = typename TestFixture::Server_session;
+  using flow::error::Runtime_error;
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("SrvSelf");
+  pair.remove_server_persistent_bits(false);
+
+  auto srv_app_bad_uid = pair.m_srv_app;
+  srv_app_bad_uid.m_user_id += 1;
+  auto srv_app_bad_path = pair.m_srv_app;
+  srv_app_bad_path.m_exec_path = "/bin/some/other/binary";
+  auto srv_app_respelled_path = pair.m_srv_app;
+  srv_app_respelled_path.m_exec_path = pair.m_srv_app.m_exec_path.parent_path() / "."
+                                         / pair.m_srv_app.m_exec_path.filename();
+  ASSERT_NE(srv_app_respelled_path.m_exec_path.string(), pair.m_srv_app.m_exec_path.string());
+
+  const auto expect_ctor_error = [&](const Server_app& srv_app, error::Code expected_code)
+  {
+    Error_code err_code;
+    {
+      Session_server srv{this->ipc_logger(), srv_app, pair.m_cli_apps, &err_code};
+    } // The failed object's dtor runs here.
+    EXPECT_TRUE(err_code == expected_code)
+      << "Server_app exec path [" << srv_app.m_exec_path << "], UID [" << srv_app.m_user_id << "]: expected "
+         "ctor error [" << Error_code{expected_code} << "]; got: [" << err_code << "] [" << err_code.message() << "].";
+  };
+
+  FLOW_LOG_INFO("Constructing servers off miscast Server_apps; each must fail with the specific code.");
+  expect_ctor_error(srv_app_bad_uid, error::Code::S_RESOURCE_OWNER_UNEXPECTED);
+  expect_ctor_error(srv_app_bad_path, error::Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT);
+  expect_ctor_error(srv_app_respelled_path, error::Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT);
+
+  bool threw = false;
+  try
+  {
+    Session_server srv{this->ipc_logger(), srv_app_bad_path, pair.m_cli_apps};
+  }
+  catch (const Runtime_error& exc)
+  {
+    threw = true;
+    EXPECT_TRUE(exc.code() == error::Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT)
+      << "Got: [" << exc.code() << "] [" << exc.code().message() << "].";
+  }
+  EXPECT_TRUE(threw);
+
+  FLOW_LOG_INFO("All rejected as expected.  A server off the truthful Server_app must work.");
+  this->start_server(&pair);
+  Client_session cli{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
+  Server_session srv_session;
+  this->connect_ok(&pair, &cli, &srv_session);
+
+  pair.destroy_sessions(&cli, &srv_session);
+  pair.m_srv.reset();
+  pair.remove_server_persistent_bits();
+}
+
 /* A client built with different compile-time session-config template parameters than the server's:
  * the log-in handshake transmits the client's config, and the server must reject on the mismatch --
  * CONFIG_MISMATCH server-side, generic connect failure client-side, and no damage to the server.
@@ -841,6 +1040,56 @@ TYPED_TEST_P(Session_connect_test, Almost_peer)
   pair.destroy_sessions(&cli, &srv_session);
   pair.m_srv.reset();
   pair.remove_server_persistent_bits();
+}
+
+/* NULL state: a default-cted session object -- and, equivalently per contract, a moved-from one -- has no
+ * impl inside.  The Session-concept APIs return their sentinels: nil token, null metadata builder,
+ * open_channel() false, the null-credentials sentinel (by reference identity, as documented), null
+ * info_collector().  Beyond the concept: get_logger() returns null, and get_log_component() is usable (the
+ * session component) -- both without an impl to consult.  Both sides; no server needed.
+ *
+ * Plus a compile-time check: the Structured_msg_reader_config alias is not (by copy-paste accident) the
+ * builder-config type. */
+TYPED_TEST_P(Session_connect_test, Null_state)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using Channel_obj = typename TestFixture::Channel_obj;
+
+  static_assert(!std::is_same_v<typename Client_session::Structured_msg_reader_config,
+                                typename Client_session::Structured_msg_builder_config>,
+                "Reader-config alias must not be the builder-config type.");
+  static_assert(!std::is_same_v<typename Server_session::Structured_msg_reader_config,
+                                typename Server_session::Structured_msg_builder_config>,
+                "Reader-config alias must not be the builder-config type.");
+
+  const auto probe_null = [](auto& session, const string& ctx)
+  {
+    EXPECT_TRUE(session.session_token().is_nil()) << ctx;
+    EXPECT_FALSE(session.mdt_builder()) << ctx;
+    Channel_obj chan;
+    EXPECT_FALSE(session.open_channel(&chan)) << ctx;
+    EXPECT_EQ(&session.remote_peer_process_credentials(), &util::NULL_PROCESS_CREDENTIALS) << ctx;
+    EXPECT_EQ(session.info_collector(), nullptr) << ctx;
+    EXPECT_EQ(session.get_logger(), nullptr) << ctx;
+    EXPECT_TRUE(session.get_log_component().template payload<Log_component>() == Log_component::S_SESSION) << ctx;
+  };
+
+  FLOW_LOG_INFO("Probing default-cted sessions (both sides).");
+  Client_session cli_default;
+  Server_session srv_default;
+  probe_null(cli_default, "default-cted client");
+  probe_null(srv_default, "default-cted server");
+
+  FLOW_LOG_INFO("Probing a moved-from (never-connected) client session.");
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("NullState");
+  Client_session cli_src{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
+  Client_session cli_dst{std::move(cli_src)};
+  probe_null(cli_src, "moved-from client"); // As-if default-cted, per contract.
 }
 
 /* Channel passive-open rejection.  All clients in this file use the Client_session ctor form without
@@ -1066,100 +1315,20 @@ TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
   pair.remove_server_persistent_bits();
 } // TYPED_TEST_P(Session_connect_test, Open_channel_crossing)
 
-/* The server-side user closes a just-passive-opened channel end immediately, while the client's active
- * open_channel() is still attaching to the channel's resources.  Destroying either MQ pipe-end unlinks the MQ's
- * name (see Blob_stream_mq_sender docs), and the server hands the end to its user right after sending the
- * response; so the client's attach races the unlink and, on losing, cannot open the MQ.  Per contract that is a
- * non-fatal open_channel() outcome: the call returns `true` with a system error (ENOENT on the MQ open), the
- * session survives, and the target channel is untouched.  Winning the race is fine too: the client gets a
- * channel whose peer end is already gone, which is the user's business.  So each open must yield exactly one of
- * those two outcomes -- never anything else, in particular never an abort -- and the session must be intact
- * afterwards.  The race is timing-based; how often it fires is logged for information, not asserted.  Not
- * possible on the server side: it creates the resources itself, so a client's immediate close cannot make its
- * open_channel() fail this way.
- *
- * Skipped under TSAN for the same reason as Open_channel_crossing (rapid cross-thread descriptor churn). */
+/* The server-side user closes each just-passive-opened channel end immediately; the client actively opens.
+ * See run_peer_closes_immediately() for the scenario, the race, and what is asserted. */
 TYPED_TEST_P(Session_connect_test, Open_channel_peer_closes_immediately)
 {
-  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
-  if constexpr(flow::test::tsan_enabled())
-  {
-    GTEST_SKIP() << "Skipped under ThreadSanitizer: descriptor-number-reuse false positives; see "
-                    "Open_channel_crossing's doc comment.";
-  }
-  using Pair = typename TestFixture::Pair;
-  using Client_session = typename TestFixture::Client_session;
-  using Server_session = typename TestFixture::Server_session;
-  using Channel_obj = typename TestFixture::Channel_obj;
-  using boost::system::errc::no_such_file_or_directory;
-  using std::atomic;
+  this->run_peer_closes_immediately(false);
+}
 
-  constexpr size_t N_OPENS = 20;
-
-  const auto pair_ptr = boost::make_shared<Pair>();
-  auto& pair = *pair_ptr;
-  pair.populate_apps("PeerCloses");
-  pair.remove_server_persistent_bits(false);
-
-  this->start_server(&pair);
-  Server_session srv_session;
-  const auto outcome = this->post_accept(&pair, &srv_session);
-  Client_session cli{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
-  Error_code err_code;
-  EXPECT_TRUE(cli.sync_connect(cli.mdt_builder(), nullptr, nullptr, nullptr, &err_code));
-  EXPECT_FALSE(err_code) << "sync_connect error: [" << err_code << "] [" << err_code.message() << "].";
-  Error_code accept_err;
-  this->await_accept(outcome, &accept_err);
-  ASSERT_FALSE(accept_err) << "async_accept error: [" << accept_err << "] [" << accept_err.message() << "].";
-
-  // The server's passive-open handler lets each new channel end die on the spot.  (Runs on the session's thread.)
-  const auto n_passive = boost::make_shared<atomic<size_t>>(0);
-  srv_session.init_handlers([](const Error_code&) {},
-                            [n_passive](Channel_obj&& /*new_chan*/, auto&& /*mdt_reader*/) { ++*n_passive; });
-
-  size_t n_attached = 0;
-  size_t n_yanked = 0;
-  for (size_t idx = 0; idx != N_OPENS; ++idx)
-  {
-    Channel_obj chan;
-    Error_code chan_err;
-    ASSERT_TRUE(cli.open_channel(&chan, &chan_err)) << "Open #" << idx << ": open_channel() reported not carried out.";
-    if (!chan_err)
-    {
-      ++n_attached;
-    }
-    else
-    {
-      EXPECT_TRUE(chan_err == no_such_file_or_directory)
-        << "Open #" << idx << ": expected the peer-closed-early system error; got: [" << chan_err << "] ["
-        << chan_err.message() << "].";
-      ++n_yanked;
-    }
-  }
-  FLOW_LOG_INFO("Of [" << N_OPENS << "] opens against a peer that closes immediately: [" << n_attached << "] "
-                "attached (race won), [" << n_yanked << "] refused with the peer-closed-early error (race lost).  "
-                "Either is fine.");
-
-  // No worse for wear?
-  EXPECT_FALSE(cli.session_token().is_nil());
-  EXPECT_EQ(srv_session.session_token(), cli.session_token());
-  Channel_obj chan;
-  Error_code chan_err;
-  EXPECT_TRUE(cli.open_channel(&chan, &chan_err)); // One more, for good measure: still no abort/hosing.
-  EXPECT_TRUE((!chan_err) || (chan_err == no_such_file_or_directory)) << "[" << chan_err << "].";
-  chan = Channel_obj{};
-  /* Every request reached the server and was passive-opened there.  (The server invokes its handler after sending
-   * the response, so the last invocation may trail our last open_channel() return by a moment.) */
-  for (size_t idx = 0; (idx != 500) && (n_passive->load() != (N_OPENS + 1)); ++idx)
-  {
-    flow::util::this_thread::sleep_for(boost::chrono::milliseconds(10));
-  }
-  EXPECT_EQ(n_passive->load(), N_OPENS + 1);
-
-  pair.destroy_sessions(&cli, &srv_session);
-  pair.m_srv.reset();
-  pair.remove_server_persistent_bits();
-} // TYPED_TEST_P(Session_connect_test, Open_channel_peer_closes_immediately)
+/* As Open_channel_peer_closes_immediately, mirrored: the client-side user closes; the server actively opens.
+ * Today this direction has no race (see run_peer_closes_immediately()); the test deliberately does not rely on
+ * that. */
+TYPED_TEST_P(Session_connect_test, Open_channel_peer_closes_immediately_srv_opens)
+{
+  this->run_peer_closes_immediately(true);
+}
 
 /* A pending async_accept() aborted by Session_server destruction: per the boost.asio-like contract the
  * handler must still fire -- with the specific object-shutdown code. */
@@ -1246,6 +1415,150 @@ TYPED_TEST_P(Session_connect_test, Concurrent_accepts)
   pair.m_srv.reset();
   pair.remove_server_persistent_bits();
 }
+
+/* The `sync_io`-pattern server-side adapters (Session_server_adapter, Server_session_adapter): their API-misuse
+ * guards must refuse (return false; no-op) rather than misbehave.  In order:
+ *   - Session_server_adapter::async_accept() before its start_ops(): refused; nothing is started (its handler
+ *     never fires).
+ *   - Server_session_adapter::init_handlers() before its start_ops(): refused.
+ *   - Ditto after start_ops(), but before the adapter holds an accepted session: refused -- and without residue:
+ *     once a successful async_accept() fills that same adapter, init_handlers() succeeds.
+ *   - A second async_accept() while one is outstanding: refused (the outstanding one completes normally).
+ *   - init_handlers() again in PEER state: refused; ditto after the session's error handler has fired (the
+ *     opposing client session having been destroyed).
+ * The client side is a regular async-I/O Client_session: the adapters' dealings with it are not the subject.
+ * All adapter API calls run on the event-loop thread, since the `sync_io` pattern forbids them to run
+ * concurrently with the adapters' `(*on_active_ev_func)()` calls (which run there). */
+TYPED_TEST_P(Session_connect_test, Sync_io_adapter_guards)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Session_server_sio = typename TestFixture::Session_server::Sync_io_obj;
+  using Server_session_sio = typename Session_server_sio::Session_obj;
+  using util::sync_io::Asio_waitable_native_handle;
+  using util::sync_io::Task_ptr;
+  using flow::async::Single_thread_task_loop;
+  using boost::chrono::seconds;
+  using std::atomic;
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("SioGuards");
+  pair.remove_server_persistent_bits(false);
+
+  /* The user event loop.  Teardown (at the end) stops it before destroying the adapters, whose event-wait
+   * handles are its I/O objects.  (On an ASSERT bail-out the adapters die first, with the loop idling in its
+   * reactor -- acceptable for a failing run.)  ender_thread: see the client-destruction step. */
+  Single_thread_task_loop loop{nullptr, "sioGuards"};
+  loop.start();
+  Single_thread_task_loop ender_thread{nullptr, "sioEnder"};
+  ender_thread.start();
+
+  // Runs `func` on the loop thread; returns once it has.
+  const auto on_loop = [&](const auto& func)
+  {
+    boost::promise<void> done;
+    loop.post([&]()
+    {
+      func();
+      done.set_value();
+    });
+    done.get_future().wait();
+  };
+
+  // The canonical `sync_io`-pattern hookup: satisfy the adapters' async-wait requests via `loop`.
+  const auto make_ev_hndl = [&loop]() { return Asio_waitable_native_handle{*(loop.task_engine())}; };
+  const auto ev_wait_func = [](Asio_waitable_native_handle* hndl_of_interest,
+                               bool ev_of_interest_snd_else_rcv, Task_ptr&& on_active_ev_func)
+  {
+    hndl_of_interest->async_wait(ev_of_interest_snd_else_rcv ? Asio_waitable_native_handle::Base::wait_write
+                                                             : Asio_waitable_native_handle::Base::wait_read,
+                                 [on_active_ev_func = std::move(on_active_ev_func)](const Error_code& err_code)
+    {
+      if (err_code != boost::asio::error::operation_aborted)
+      {
+        (*on_active_ev_func)();
+      }
+    });
+  };
+
+  auto srv = std::make_unique<Session_server_sio>(this->ipc_logger(),
+                                                  pair.m_srv_apps.find(pair.m_srv_app.m_name)->second,
+                                                  pair.m_cli_apps);
+  auto sess = std::make_unique<Server_session_sio>();
+
+  // Handler outcome holders; shared_ptr for the usual reason (no handler may fire into dead locals).
+  const auto accept_done = boost::make_shared<boost::promise<void>>();
+  const auto accept_err = boost::make_shared<Error_code>();
+  const auto on_accept = [accept_done, accept_err](const Error_code& err_code)
+  {
+    *accept_err = err_code;
+    accept_done->set_value();
+  };
+  const auto stray_fired = boost::make_shared<atomic<bool>>(false);
+  const auto on_stray_accept = [stray_fired](const Error_code&) { *stray_fired = true; };
+  const auto hosed = boost::make_shared<boost::promise<void>>();
+  const auto on_err = [hosed](const Error_code&) { hosed->set_value(); };
+
+  FLOW_LOG_INFO("Before any start_ops(): async_accept() and init_handlers() must be refused.");
+  on_loop([&]()
+  {
+    EXPECT_FALSE(srv->async_accept(sess.get(), on_stray_accept));
+    EXPECT_FALSE(sess->init_handlers(on_err));
+  });
+
+  FLOW_LOG_INFO("Both adapters started; init_handlers() on the not-yet-accepted session adapter must be refused.");
+  on_loop([&]()
+  {
+    EXPECT_TRUE(srv->replace_event_wait_handles(make_ev_hndl));
+    EXPECT_TRUE(srv->start_ops(ev_wait_func));
+    EXPECT_TRUE(sess->replace_event_wait_handles(make_ev_hndl));
+    EXPECT_TRUE(sess->start_ops(ev_wait_func));
+    EXPECT_FALSE(sess->init_handlers(on_err));
+  });
+
+  FLOW_LOG_INFO("async_accept(); a second one while it is outstanding must be refused; then a client connects.");
+  on_loop([&]()
+  {
+    EXPECT_TRUE(srv->async_accept(sess.get(), on_accept));
+    EXPECT_FALSE(srv->async_accept(sess.get(), on_stray_accept));
+  });
+  const auto cli = boost::make_shared<Client_session>(this->ipc_logger(), pair.m_cli_app, pair.m_srv_app,
+                                                      [](const Error_code&) {});
+  Error_code err_code;
+  EXPECT_TRUE(cli->sync_connect(cli->mdt_builder(), nullptr, nullptr, nullptr, &err_code));
+  EXPECT_FALSE(err_code) << "sync_connect error: [" << err_code << "] [" << err_code.message() << "].";
+  ASSERT_EQ(accept_done->get_future().wait_for(seconds(5)), boost::future_status::ready)
+    << "Adapter async_accept handler did not fire in time.";
+  EXPECT_FALSE(*accept_err) << "[" << *accept_err << "] [" << accept_err->message() << "].";
+
+  FLOW_LOG_INFO("Accepted.  init_handlers() must now succeed (the earlier refusals left no residue); "
+                "a repeat must be refused.");
+  on_loop([&]()
+  {
+    EXPECT_TRUE(sess->init_handlers(on_err));
+    EXPECT_FALSE(sess->init_handlers(on_err));
+    EXPECT_FALSE(sess->core()->session_token().is_nil());
+  });
+
+  /* The client session's dtor runs on a helper thread: under SHM-jemalloc it blocks until the opposing (our
+   * server session's) dtor begins -- see run_graceful_end().  Our dtor is at teardown below. */
+  FLOW_LOG_INFO("Client session destroyed; the server session's error handler must fire; init_handlers() must "
+                "still be refused.");
+  ender_thread.post([cli]() { *cli = Client_session{}; });
+  ASSERT_EQ(hosed->get_future().wait_for(seconds(5)), boost::future_status::ready)
+    << "Server session adapter's error handler did not fire though the opposing session's dtor started.";
+  on_loop([&]() { EXPECT_FALSE(sess->init_handlers(on_err)); });
+
+  loop.stop();
+  sess.reset(); // (SHM-jemalloc: this releases the client dtor, blocked on ender_thread.)
+  ender_thread.stop();
+  srv.reset();
+  EXPECT_FALSE(stray_fired->load()) << "A refused async_accept()'s handler must never fire.";
+
+  pair.remove_server_persistent_bits();
+} // TYPED_TEST_P(Session_connect_test, Sync_io_adapter_guards)
 
 /* The graceful session-end choreography, server side initiating.  See run_graceful_end() doc for the
  * list of what is covered (error-handler firing semantics both sides; the SHM-jemalloc dtor gate vs.
@@ -1465,11 +1778,11 @@ TYPED_TEST_P(Session_connect_test, Shm_accessors)
 } // TYPED_TEST_P(Session_connect_test, Shm_accessors)
 
 REGISTER_TYPED_TEST_SUITE_P(Session_connect_test,
-                            No_server, Corrupt_cns, Stale_cns_then_retry, Rejected_identities,
-                            Config_mismatch, Almost_peer, Passive_open_rejected, Open_channel_crossing,
-                            Open_channel_peer_closes_immediately, Accept_abort,
-                            Concurrent_accepts, Graceful_end_srv_initiates, Graceful_end_cli_initiates,
-                            Server_knobs, Shm_accessors);
+                            No_server, Corrupt_cns, Stale_cns_then_retry, Rejected_identities, Server_self_check,
+                            Config_mismatch, Almost_peer, Null_state, Passive_open_rejected, Open_channel_crossing,
+                            Open_channel_peer_closes_immediately, Open_channel_peer_closes_immediately_srv_opens,
+                            Accept_abort, Concurrent_accepts, Sync_io_adapter_guards, Graceful_end_srv_initiates,
+                            Graceful_end_cli_initiates, Server_knobs, Shm_accessors);
 
 } // Anonymous namespace
 

@@ -1049,7 +1049,7 @@ void CLASS_CLI_SESSION_IMPL::dtor_async_worker_stop()
    * the user's on-error handler.  See Session_base::m_dtor_started doc header (rationale et al).  Posting order
    * matters: this precedes any Graceful_finisher tasks below, and thread W executes in-order.
    *
-   * Reiterating here though: Nothing can and this won't prevent handler firing during dtor altogether; it
+   * Reiterating here though: Nothing can -- and this won't -- prevent handler firing during dtor altogether; it
    * might be happening already.  Said doc header explains why we still prevent it from this point on. */
   m_async_worker.post([this]() { Base::set_dtor_started(); });
 
@@ -1106,14 +1106,20 @@ void CLASS_CLI_SESSION_IMPL::dtor_async_worker_stop()
     // else
 
     promise<void> done_promise;
-    m_master_channel->async_end_sending([&](const Error_code&)
+    const bool did_it = m_master_channel->async_end_sending([&](const Error_code&)
     {
       // We are in thread Wc (unspecified, really struc::Channel async callback thread).
       FLOW_LOG_TRACE("Client session [" << *this << "]: Shutdown: master channel outgoing-direction flush finished.");
       done_promise.set_value();
     });
     // Back here in thread W:
-    done_promise.get_future().wait();
+    if (did_it)
+    {
+      done_promise.get_future().wait();
+    }
+    /* else
+     * { Don't care if returned false and did nothing: cool then; did our best.
+     *   Really it shouldn't happen: we don't call it twice, and channel was up for sure.  So @todo assert(). } */
   }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker.post()
   // Back here in thread U: done; yay.
 
@@ -2412,20 +2418,36 @@ bool CLASS_CLI_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
                    "sans error, and response received in time.");
 
     const auto root = open_channel_rsp->body_root().getOpenChannelToServerRsp();
-    switch (root.getOpenChannelResult())
+    /* The value comes from the (trusted) opposing peer; but as usual we handle its misbehavior on a best-effort basis:
+     * a value it should never send (the sentinel; or an out-of-range value) is treated as a refusal -- never as
+     * success. */
+    const auto open_channel_result = root.getOpenChannelResult();
+    bool result_expected = false;
+    switch (open_channel_result)
     {
     case OpenChannelResult::ACCEPTED:
       assert(!*err_code);
+      result_expected = true;
       break;
     case OpenChannelResult::REJECTED_PASSIVE_OPEN:
       *err_code = error::Code::S_SESSION_OPEN_CHANNEL_REMOTE_PEER_REJECTED_PASSIVE_OPEN;
+      result_expected = true;
       break;
     case OpenChannelResult::REJECTED_RESOURCE_UNAVAILABLE:
       *err_code = error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE;
+      result_expected = true;
       break;
     case OpenChannelResult::END_SENTINEL:
-      assert(false);
-    } // Compiler should catch missing enum value.
+      break;
+    } // Compiler should catch missing enum value.  (Out-of-range raw values skip all cases.)
+
+    if (!result_expected)
+    {
+      FLOW_LOG_WARNING("Client session [" << *this << "]: Channel open active request: Response received but "
+                       "contains unexpected result value [" << int(open_channel_result) << "] -- opposing peer "
+                       "(server) misbehaved?  Treating it as refusal of the passive-open.");
+      *err_code = error::Code::S_SESSION_OPEN_CHANNEL_REMOTE_PEER_REJECTED_PASSIVE_OPEN;
+    }
 
     if (*err_code)
     {

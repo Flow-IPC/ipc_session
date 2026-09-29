@@ -23,6 +23,7 @@
 #include "ipc/util/sync_io/sync_io_fwd.hpp"
 #include "ipc/transport/transport_fwd.hpp"
 #include <boost/move/make_unique.hpp>
+#include <queue>
 
 namespace ipc::session::sync_io
 {
@@ -253,10 +254,10 @@ private:
 
     // Data.
 
-    /// Result 1/2 given about to be given to #m_on_channel_func_or_empty.
+    /// Result 1/2 about to be given to #m_on_channel_func_or_empty.
     Channel_obj m_channel;
 
-    /// Result 2/2 given about to be given to #m_on_channel_func_or_empty.
+    /// Result 2/2 about to be given to #m_on_channel_func_or_empty.
     Mdt_reader_ptr m_mdt_reader_ptr;
   };
 
@@ -266,9 +267,9 @@ private:
   // Methods.
 
   /**
-   * Signaled by the function returned by on_channel_func_sio(), it returns the IPC-pipe to steady-state (empty,
-   * not readable), invokes the original user handler passed to on_channel_func_sio(), and lastly
-   * begins the next async-wait for the procedure.
+   * Signaled by the function returned by on_channel_func_sio(), it pops the next result from
+   * #m_target_channel_open_q and invokes #m_on_channel_func_or_empty with it; then consumes the corresponding
+   * signal byte from the IPC-pipe; and lastly begins the next async-wait for the procedure.
    */
   void on_ev_channel_open();
 
@@ -276,8 +277,9 @@ private:
    * Returns the proper on-error handler to set up on the underlying #Session_obj (`Client_session`:
    * via ctor; `Server_session`: via `init_handlers()`).
    *
-   * The resulting handler must not be invoked before start_ops() and #m_on_err_func being set;
-   * else behavior undefined.
+   * The resulting handler merely records the result and signals the IPC-pipe (so it may fire at any time); the
+   * user-thread handling of that signal invokes #m_on_err_func, which must be set by then.  (It is: via ctor, before
+   * the core even exists; via init_handlers(), right after installing the handler, in the same user-thread call.)
    *
    * @return See above.
    */
@@ -287,8 +289,7 @@ private:
    * Returns the proper on-passive-channel-open handler to set up on the underlying #Session_obj (`Client_session`:
    * via ctor; `Server_session`: via `init_handlers()` 2-arg form).
    *
-   * The resulting handler must not be invoked before start_ops() and #m_on_channel_func_or_empty being set;
-   * else behavior undefined.
+   * Same notes as for on_err_func_sio() apply here, with #m_on_channel_func_or_empty in place of #m_on_err_func.
    *
    * @return See above.
    */
@@ -315,7 +316,7 @@ private:
   flow::util::Task_engine m_ev_hndl_task_engine_unused;
 
   /**
-   * Read-end of IPC-pipe used by `*this` used to detect that the error-wait has completed.  The signal byte
+   * Read-end of IPC-pipe used by `*this` to detect that the error-wait has completed.  The signal byte
    * is detected in #m_ready_reader_err.  There is no need to read it, as an error can occur at most once.
    *
    * @see #m_ready_writer_err.
@@ -332,7 +333,7 @@ private:
   util::sync_io::Asio_waitable_native_handle m_ev_wait_hndl_err;
 
   /**
-   * Read-end of IPC-pipe used by `*this` used to detect that a channel-open-wait has completed.  The signal byte
+   * Read-end of IPC-pipe used by `*this` to detect that a channel-open-wait has completed.  The signal byte
    * is read out of #m_ready_reader_chan, after it was written there via #m_ready_writer_chan.  As explained in
    * #m_target_channel_open_q doc header, channel-opens can occur at any time from another thread, even while
    * `*this` is synchronously dealing with an existing one; therefore this is a rare case where more than 1 byte
@@ -363,12 +364,12 @@ private:
    */
   util::sync_io::Event_wait_func m_ev_wait_func;
 
-  /// `on_err_func` from init_handlers(); `.empty()` until then.
+  /// `on_err_func` from init_handlers() or ctor; `.empty()` until then, and once it has been invoked.
   flow::async::Task_asio_err m_on_err_func;
 
   /**
-   * `on_passive_open_channel_func_or_empty` from init_handlers() (possibly `.empty()` if not supplied); until then
-   * `.empty()`.
+   * `on_passive_open_channel_func_or_empty` from init_handlers() or ctor (possibly `.empty()` if not supplied);
+   * until then `.empty()`.
    */
   On_channel_func m_on_channel_func_or_empty;
 
@@ -475,23 +476,27 @@ template<typename Task_err, typename On_passive_open_channel_handler>
 bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg,
                                              On_passive_open_channel_handler&& on_passive_open_channel_func_arg)
 {
-  if (!m_on_err_func.empty())
+  if (m_ev_wait_func.empty())
   {
-    FLOW_LOG_WARNING("Session_adapter [" << m_async_io << "]: init_handlers() called duplicately.  Ignoring.");
+    FLOW_LOG_WARNING("Session_adapter [" << m_async_io << "]: init_handlers() called before start_ops().  Ignoring.");
     return false;
   }
   // else
-  assert(m_on_channel_func_or_empty.empty());
+
+  /* Install into the core first; it rejects a duplicate call (or a not-yet-accepted, as-if-default-cted core).
+   * Only then save the user handlers.  That order is fine: the *_sio() handlers, which may fire (in thread W) as soon
+   * as this returns, touch only the IPC-pipes, m_target_*; while the user handlers are read only via
+   * (*on_active_ev_func)() -- in the user's thread, not concurrently with us (per `sync_io` pattern). */
+  if (!core()->init_handlers(on_err_func_sio(), on_channel_func_sio()))
+  {
+    FLOW_LOG_WARNING("Session_adapter [" << m_async_io << "]: init_handlers() rejected by the async-I/O core "
+                     "(called duplicately? session not yet accepted?).  Ignoring.");
+    return false;
+  }
+  // else
 
   m_on_err_func = std::move(on_err_func_arg);
   m_on_channel_func_or_empty = std::move(on_passive_open_channel_func_arg);
-
-#ifndef NDEBUG
-  const bool ok =
-#endif
-  core()->init_handlers(on_err_func_sio(), on_channel_func_sio());
-
-  assert(ok && "We should have caught this with the above guard.");
   return true;
 } // Session_adapter::init_handlers()
 
@@ -499,21 +504,23 @@ template<typename Session>
 template<typename Task_err>
 bool Session_adapter<Session>::init_handlers(Task_err&& on_err_func_arg)
 {
-  if (!m_on_err_func.empty())
+  if (m_ev_wait_func.empty())
   {
-    FLOW_LOG_WARNING("Session_adapter [" << m_async_io << "]: init_handlers() called duplicately.  Ignoring.");
+    FLOW_LOG_WARNING("Session_adapter [" << m_async_io << "]: init_handlers() called before start_ops().  Ignoring.");
+    return false;
+  }
+  // else
+
+  // Same comment as in the other overload.
+  if (!core()->init_handlers(on_err_func_sio()))
+  {
+    FLOW_LOG_WARNING("Session_adapter [" << m_async_io << "]: init_handlers() rejected by the async-I/O core "
+                     "(called duplicately? session not yet accepted?).  Ignoring.");
     return false;
   }
   // else
 
   m_on_err_func = std::move(on_err_func_arg);
-
-#ifndef NDEBUG
-  const bool ok =
-#endif
-  core()->init_handlers(on_err_func_sio());
-
-  assert(ok && "We should have caught this with the above guard.");
   return true;
 } // Session_adapter::init_handlers()
 
@@ -573,7 +580,7 @@ bool Session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
   }));
 
   /* Subtlety: It is tempting to guard this with `if (!m_on_channel_func_or_empty.empty()) {}` in the effort to
-   * avoid an an async-wait that will never get satisfied.  However that only works in the Client_session case,
+   * avoid an async-wait that will never get satisfied.  However that only works in the Client_session case,
    * when m_on_channel_func_or_empty is known from ction.  Server_session still needs init_handlers() by user,
    * and indeed that would be after start_ops(), so => bug.  We could add fancier logic to account for this,
    * but who really cares?  So it'll register an extra FD in some boost.asio epoll-set.  Meh. */
@@ -634,7 +641,7 @@ bool Session_adapter<Session>::replace_event_wait_handles(const Create_ev_wait_h
   // else
 
   FLOW_LOG_INFO("Session_adapter [" << m_async_io << "]: Replacing event-wait handles (probably to replace underlying "
-                "execution context without outside event loop's boost.asio Task_engine or similar).");
+                "execution context with outside event loop's boost.asio Task_engine or similar).");
 
   assert(m_ev_wait_hndl_err.is_open());
   assert(m_ev_wait_hndl_chan.is_open());
@@ -701,7 +708,7 @@ typename Session_adapter<Session>::On_channel_func
     util::pipe_produce(get_logger(), &m_ready_writer_chan);
   }; // return [](){}
 
-  /* start_ops() will set up the (first) async-wait for m_ready_reader_err being readable, as well as
+  /* start_ops() will set up the (first) async-wait for m_ready_reader_chan being readable, as well as
    * the action on that wait being satisfied; namely: to pipe_consume() that signal + begin the next wait. */
 } // Session_adapter::on_channel_func_sio()
 

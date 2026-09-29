@@ -116,7 +116,7 @@ namespace ipc::session
  * Note the Lifetime section speaks only of Session destruction causing `!master_channel_live()`.  Internally
  * there is also a degenerate window: Server_session_impl's init-channel-opening failure path resets the SMC
  * `shared_ptr` *after* having emplaced its Info_collector member.  However that is not user-reachable: a failed
- * `Session_server::async_accept()` leaves the user's target `Server_session` untouched (empty), so the user
+ * `Session_server::async_accept()` leaves the user's target `Server_session` empty (as-if default-cted), so the user
  * never sees the affected `..._impl`.  And even if some future refactor changed that: the graceful
  * `!master_channel_live()` semantics make the window moot anyway.
  *

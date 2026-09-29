@@ -77,7 +77,7 @@ namespace ipc::session
  *   - server (via the user args from Session_server::async_accept() forwarded to async_accept_log_in()) requested
  *     0 init-channels to be opened on local user's behalf.
  *
- * However, if the sum of these 2 numbers (as determined upon successful receipt on `LogInReq`, and assuming
+ * However, if the sum of these 2 numbers (as determined upon successful receipt of `LogInReq`, and assuming
  * everything else was also successful, up-to-and-including sending successful `LogInRsp`) is N=1+, then before
  * async_accept_log_in() can reach almost-PEER state (and fire completion handler), there is 1 more async-step:
  *   - (send `LogInRsp` as explained);
@@ -87,7 +87,7 @@ namespace ipc::session
  *     (exactly as would occur on N open_channel() calls in PEER state);
  *   - async: await a *single* `OpenChannelToClientRsp` response, indicating the last of the N channels has been
  *     accepted, and client is now in PEER state and ready for passive-opens (i.e., we can enter PEER-state
- *     which enabled open_channel() by the local user).
+ *     which enables open_channel() by the local user).
  *
  * Why this last async step?  Couldn't we just do the `send()`s and go to almost-PEER state immediately?
  * Almost: but if we did that, then if the user immediately issued init_handlers() and an open_channel(),
@@ -144,7 +144,7 @@ namespace ipc::session
  * ### PEER state impl ###
  * Here our algorithm is complementary to the PEER state algorithm in Client_session_impl.  Namely we expect
  * passive-opens via an appropriate transport::struc::Channel::expect_msgs(); and we allow active-opens via
- * open_channel().  The details of how these work is best understood just by reading that code inline.  All in
+ * open_channel().  The details of how these work are best understood just by reading that code inline.  All in
  * all, publicly it's just like Client_session_impl; but internally it is its complement and in fact has
  * different (complementary) responsibilities.  Most notably, regarding active-opens and passive-opens:
  *   - Server_session_impl is the one always internally responsible for acquiring the resources needed to
@@ -278,6 +278,8 @@ public:
    *
    * @param srv
    *        See Server_session_mv counterpart.
+   * @param mq_msg_size_limit
+   *        See Server_session_mv counterpart.
    * @param init_channels_by_srv_req
    *        See Server_session_mv counterpart.
    * @param mdt_from_cli_or_null
@@ -300,7 +302,7 @@ public:
   template<typename Session_server_impl_t,
            typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
            typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
-  void async_accept_log_in(Session_server_impl_t* srv,
+  void async_accept_log_in(Session_server_impl_t* srv, size_t mq_msg_size_limit,
                            Channels* init_channels_by_srv_req,
                            Mdt_reader_ptr* mdt_from_cli_or_null,
                            Channels* init_channels_by_cli_req,
@@ -472,7 +474,7 @@ private:
   /**
    * An open-channel request out-message.  Together with that is stored a `Builder` into its metadata
    * sub-field as well as the already-prepared #Channel_obj, the local transport::Channel peer object in PEER state,
-   * since on the server side it is our responsibility acquire the shared resources for both sides.
+   * since on the server side it is our responsibility to acquire the shared resources for both sides.
    *
    * The design here is identical to Client_session_impl::Open_channel_req; so see its doc header.  The only
    * difference is the addition of #m_opened_channel; see its doc header just below.
@@ -548,7 +550,7 @@ private:
   /**
    * In thread W, handler for #m_master_channel indicating incoming-direction channel-hosing error.
    * It is possible that #m_master_channel has been `.reset()` in the meantime, by seeing log-in failure
-   * in on_master_channel_open_channel_req(), and no longer exists.
+   * in the log-in request handler (see async_accept_log_in()), and no longer exists.
    *
    * @param err_code
    *        The non-success #Error_code from transport::struc::Channel.
@@ -569,7 +571,7 @@ private:
   void on_master_channel_open_channel_req(typename Master_structured_channel::Msg_in_ptr&& open_channel_req);
 
   /**
-   * In thread W acquires the needed shared sources (MQs and/or `Native_handle` pair as of this writing) and creates
+   * In thread W acquires the needed shared resources (MQs and/or `Native_handle` pair as of this writing) and creates
    * local #Channel_obj to emit to the user thus completing the channel-open on this side.  If active-open on our part,
    * we do this immediately in mdt_builder() -- before open_channel() even -- but before the
    * #Channel_obj can be emitted to the user (1) open_channel() must actually be called (obv) and (2) client
@@ -605,7 +607,7 @@ private:
    * via out-args.  On failure undoes everything it was able to do and returns `false`; else returns `true`.
    *
    * @param mq_c2s
-   *        On success this is the handle to newly creates client->server unidirectional MQ for the new channel.
+   *        On success this is the handle to newly created client->server unidirectional MQ for the new channel.
    * @param mq_s2c
    *        Like the preceding but opposite-direction (server->client).
    * @param mq_name_c2s
@@ -627,8 +629,8 @@ private:
    * Handles the protocol negotiation at the start of the pipe, as pertains to algorithms perpetuated by
    * the vanilla ipc::session `Session` hierarchy.
    *
-   * Outgoing-direction state is touched when assembling `LogInReq` to send to opposing `Server_session`.
-   * Incoming-direction state is touched/verified at the start of interpreting `LogInRsp` receiver from there.
+   * Incoming-direction state is touched/verified at the start of interpreting `LogInReq` from opposing
+   * `Client_session`.  Outgoing-direction state is touched when assembling `LogInRsp` to send back there.
    *
    * @see transport::Protocol_negotiator doc header for key background on the topic.
    */
@@ -667,6 +669,16 @@ private:
    */
   Error_code m_pre_init_err_code;
 
+  /**
+   * Assigned (in thread W) by async_accept_log_in() (called once at most) and constant thereafter:
+   * the spawning `Session_server`'s `mq_msg_size_limit()` as of the `async_accept()` call.  Used whenever
+   * we must open an MQ-enabled `Channel`.  Unused unless #S_MQS_ENABLED.
+   *
+   * It is a cached value, so we don't need the source `Session_server` to be alive after log-in -- at least
+   * not on account of this feature.
+   */
+  size_t m_mq_msg_size_limit;
+
   /// Identical to Client_session_impl::m_last_passively_opened_channel_id.
   unsigned int m_last_passively_opened_channel_id;
 
@@ -684,8 +696,8 @@ private:
   /**
    * Worker thread (a/k/a thread W).
    *
-   * Ordering: Should be declared before #m_master_channel: It should destruct before the `Task_engine` onto which
-   * its queued-up handlers might `post()` items destructs prematurely.
+   * Ordering: Should be declared before #m_master_channel, so that the latter -- whose queued-up handlers might
+   * `post()` items onto our `Task_engine` -- destructs first.
    *
    * ### Why `mutable`? ###
    * Well, session_token() is `const` to the user but must `.post()` which is non-`const`.  This fits the spirit
@@ -746,34 +758,12 @@ private:
   Function<void ()> m_deinit_func_or_empty;
 
   /**
-   * Null until PEER state is reached, and NULL unless compile-time #S_GRACEFUL_FINISH_REQUIRED is `true`,
+   * Empty until PEER state is reached, and always empty unless compile-time #S_GRACEFUL_FINISH_REQUIRED is `true`,
    * this is used to block at the start of dtor to synchronize with the opposing `Session` dtor for safety.
    *
    * @see Session_base::Graceful_finisher doc header for all the background ever.
    */
   std::optional<typename Base::Graceful_finisher> m_graceful_finisher;
-
-  /**
-   * Permanently assigned by async_accept_log_in() (which is called once at most), then called whenever
-   * we must open an MQ-enabled `Channel` (whether during log-in as an init-channel or later due to
-   * our or opposing `open_channel()`), this returns Session_server::mq_msg_size_limit() for the
-   * `Session_server` that spawned `*this` (issued async_accept_log_in()).
-   *
-   * ### Rationale: Why store is as a functor? ###
-   * Well, firstly, it works; and there is no perf aspect to it.  So then is there a better alternative?  Answer:
-   * Basically it's either this, or async_accept_log_in() instead must store the `srv` arg somehow (as a member)
-   * instead (and then we'd just call `srv->mq_msg_size_limit()` when needed).  Why is that worse?  Honestly I
-   * (ygoldfel) don't remember right now, and as I write this it doesn't seem important to research it for this
-   * comment.  At least we can say, `srv` is of a function-template-parameterized type; so we'd need to get at the
-   * Session_server_impl core in `*srv`, probably.  Is it even worth the pain of thinking about it, given that
-   * we can quite simply grab it in the form of this functor, and let the `Function<>` machinery deal with the
-   * generic-programming difficulties?  The answer is no, I think.  (Plus, even the thinkie-pain aside, is it
-   * stylistically that great to store a `Session_server_impl*` and worry about what parts of it to access?  More
-   * thinkie-pain results.  Let's not.)
-   *
-   * We need this one value, so save the thing that can get it anytime.  Simple(r)!
-   */
-  Function<size_t()> m_mq_msg_size_limit_func;
 }; // class Server_session_impl
 
 // Free functions: in *_fwd.hpp.
@@ -802,6 +792,7 @@ CLASS_SRV_SESSION_IMPL::Server_session_impl(flow::log::Logger* logger_ptr, const
   m_protocol_negotiator_aux(get_logger(), flow::util::ostream_op_string("srv-sess-aux-", *this), 1, 1),
 
   m_master_sock_stm(std::move(master_channel_sock_stm)),
+  m_mq_msg_size_limit(0),
   m_last_passively_opened_channel_id(0),
   m_last_actively_opened_channel_id(0),
   m_last_channel_mq_id(0),
@@ -848,7 +839,7 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
    * the user's on-error handler.  See Session_base::m_dtor_started doc header (rationale et al).  Posting order
    * matters: this precedes any Graceful_finisher tasks below, and thread W executes in-order.
    *
-   * Reiterating here though: Nothing can and this won't prevent handler firing during dtor altogether; it
+   * Reiterating here though: Nothing can -- and this won't -- prevent handler firing during dtor altogether; it
    * might be happening already.  Said doc header explains why we still prevent it from this point on. */
   m_async_worker.post([this]() { Base::set_dtor_started(); });
 
@@ -894,14 +885,20 @@ void CLASS_SRV_SESSION_IMPL::dtor_async_worker_stop()
     // else
 
     promise<void> done_promise;
-    m_master_channel->async_end_sending([&](const Error_code&)
+    const bool did_it = m_master_channel->async_end_sending([&](const Error_code&)
     {
       // We are in thread Wc (unspecified, really struc::Channel async callback thread).
       FLOW_LOG_TRACE("Server session [" << *this << "]: Shutdown: master channel outgoing-direction flush finished.");
       done_promise.set_value();
-    }); // Don't care if returned false and did nothing: cool then; did our best.
+    });
     // Back here in thread W:
-    done_promise.get_future().wait();
+    if (did_it)
+    {
+      done_promise.get_future().wait();
+    }
+    /* else
+     * { Don't care it returned false and did nothing: cool then; did our best.
+     *   Really it shouldn't happen: we don't call it twice, and channel was up for sure.  So @todo assert(). } */
   }, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION); // m_async_worker.post()
   // Back here in thread U: done; yay.
 
@@ -1225,8 +1222,8 @@ typename CLASS_SRV_SESSION_IMPL::Mdt_builder_ptr CLASS_SRV_SESSION_IMPL::mdt_bui
    * "called pre-PEER => null, nothing more to it" and
    * "resource unavailable error => null, your decision whether to blow everything up or what.";
    * or we'd need to add an Error_code* out-arg, which means complicating the Session concept API, which means
-   * changing Server_session too.  Anyway, it is weird, from user's PoV, to even deal with the idea that
-   * in a Client_session the metadata-builder-returning method somehow can already fail -- they have no reason
+   * changing Client_session too.  Anyway, it is weird, from user's PoV, to even deal with the idea that
+   * in a Server_session the metadata-builder-returning method somehow can already fail -- they have no reason
    * to think resource acquisition occurs at that stage.  So at the expense of a short delay we just delegate
    * new-error reporting to open_channel() instead of making it an odd 2-step thing.
    *
@@ -1279,7 +1276,7 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
 
   /* The plan:
    *
-   * As usual we want to do all the work in thread W, where we can access m_master_channel and m_state among
+   * As usual we want to do all the work in thread W, where we can access m_master_channel among
    * other things.  We do need to return the results of the operation here in thread U though.
    * Client_session_impl::open_channel() is structured that way as well.
    *
@@ -1288,8 +1285,9 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
    * it would not typically manifest, but with coincidental timing it will:
    *
    * It requires both sides to execute open_channel() concurrently (and therefore to have registered a passive-open
-   * handler on each side).  So there's thread Ws (our thread W) and thread Wc (theirs).  In a symmetrical setup
-   * this could happen:
+   * handler on each side).  So there's thread Ws (our thread W) and thread Wc (theirs).
+   * (Those names apply within this comment only; elsewhere in this file Wc denotes the struc::Channel callback
+   * thread.)  In a symmetrical setup this could happen:
    *   - [srv] thread Ws: SMC.sync_request() begins; awaits response (blocks).
    *   - [cli] thread Wc: SMC.sync_request() begins; awaits response (blocks).
    *   - [srv] thread SMCs: got request, invoke Server_session_impl handler;
@@ -1455,20 +1453,34 @@ bool CLASS_SRV_SESSION_IMPL::open_channel(Channel_obj* target_channel, const Mdt
                    "sans error, and response received in time.");
 
     const auto root = open_channel_rsp->body_root().getOpenChannelToClientRsp();
-    switch (root.getOpenChannelResult())
+    /* The value comes from the (trusted) opposing peer; but as usual we handle its misbehavior on a best-effort basis:
+     * a value it should never send (as of this writing only the server grabs channel resources, so
+     * REJECTED_RESOURCE_UNAVAILABLE cannot legitimately come in the server-active-open path; the sentinel; or an
+     * out-of-range value) is treated as a refusal -- never as success. */
+    const auto open_channel_result = root.getOpenChannelResult();
+    bool result_expected = false;
+    switch (open_channel_result)
     {
     case OpenChannelResult::ACCEPTED:
       assert(!*err_code);
+      result_expected = true;
       break;
     case OpenChannelResult::REJECTED_PASSIVE_OPEN:
       *err_code = error::Code::S_SESSION_OPEN_CHANNEL_REMOTE_PEER_REJECTED_PASSIVE_OPEN;
+      result_expected = true;
       break;
     case OpenChannelResult::REJECTED_RESOURCE_UNAVAILABLE:
-      assert(false && "Only server grabs channel resources; not possible in server-active-open path.");
-      break;
     case OpenChannelResult::END_SENTINEL:
-      assert(false);
-    } // Compiler should catch missing enum value.
+      break;
+    } // Compiler should catch missing enum value.  (Out-of-range raw values skip all cases.)
+
+    if (!result_expected)
+    {
+      FLOW_LOG_WARNING("Server session [" << *this << "]: Channel open active request: Response received but "
+                       "contains unexpected result value [" << int(open_channel_result) << "] -- opposing peer "
+                       "(client) misbehaved?  Treating it as refusal of the passive-open.");
+      *err_code = error::Code::S_SESSION_OPEN_CHANNEL_REMOTE_PEER_REJECTED_PASSIVE_OPEN;
+    }
 
     if (*err_code)
     {
@@ -1524,7 +1536,7 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_open_channel_req
      * as then we shouldn't be called, but maybe our own logic found some session-hosing condition in the meantime. */
     return;
   }
-  // else if (!Base::hosed()): Our time to shine.  We may may make Base::hosed() true ourselves, in peace, below.
+  // else if (!Base::hosed()): Our time to shine.  We may make Base::hosed() true ourselves, in peace, below.
 
   OpenChannelResult open_channel_result = OpenChannelResult::ACCEPTED;
   Channel_obj opened_channel;
@@ -1805,7 +1817,7 @@ bool CLASS_SRV_SESSION_IMPL::make_channel_mqs(Persistent_mq_handle_from_cfg* mq_
   constexpr size_t MAX_N_MSG = 10;
 
   size_t max_msg_sz;
-  const auto cfg_limit_or_zero = m_mq_msg_size_limit_func();
+  const auto cfg_limit_or_zero = m_mq_msg_size_limit;
   if (cfg_limit_or_zero == 0) // Means pick a value ourselves.
   {
     /* We must also decide the max message of each size.  If SHM-backing is disabled, then there's no question:
@@ -1816,18 +1828,18 @@ bool CLASS_SRV_SESSION_IMPL::make_channel_mqs(Persistent_mq_handle_from_cfg* mq_
      * RAM, since each message transmitted over MQ contains merely a tiny SHM handle, right?  Yes and no:
      * For bipc MQs, yes; but POSIX MQs impose yet another limit: A given process trying to maintain a *total*
      * of X bytes of MQs at a given time (the "total" roughly meaning the sum of `MAX_N_MSG x max_msg_sz` for
-     * all then-opened MQs) will yield too-many-files (Linux errno=EMFILES) once X is exceeded.  A typical value
-     * for this is 819,200 -- or up to only *ten* MAX_N_MSxMQS_MAX_MSG_SZ such MQs opened simultaneously.
+     * all then-opened MQs) will yield too-many-files (Linux errno=EMFILE) once X is exceeded.  A typical value
+     * for this is 819,200 -- or up to only *ten* such MQs of size MAX_N_MSG x S_MQS_MAX_MSG_SZ opened simultaneously.
      * This is in practice easily exceeded.  On the other hand, suppose we instead use SHM_MAX_HNDL_SZ
      * instead of MQS_MAX_MSG_SZ -- which is sufficient, since we'll only be sending SHM handles, not the actual
      * data.  As of this writing it's 512; so that's 8,192/512=16 *times* the number of MQs creatable this way;
-     * errno=EMFILES occurs not after 10 MQs now but after 160 such MQs.  Much more reasonable.
+     * errno=EMFILE occurs not after 10 MQs now but after 160 such MQs.  Much more reasonable.
      * Trust me (ygoldfel): the ~10-MQ limit can be quite annoying.
      *
      * Update/correction: We say there, "we'll only be sending SHM handles, not the actual data."  However that
      * assumes that (1) any channel opened will in fact be upgraded to a struc::Channel; and (2) that struc::Channel
      * will use the SHM-backed serializer for its `Msg_out`s.  Neither is certain at all.  So that's why
-     * the user can override our chosen default here (hence m_mq_msg_size_limit_func() call).  The chosen default
+     * the user can override our chosen default here (hence m_mq_msg_size_limit).  The chosen default
      * does make those assumptions (and we documented this in Session_server::mq_msg_size_limit() doc header). */
     if constexpr(S_SHM_ENABLED)
     {
@@ -1893,7 +1905,8 @@ template<typename Session_server_impl_t,
          typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
          typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
 void CLASS_SRV_SESSION_IMPL::async_accept_log_in
-       (Session_server_impl_t* srv,
+       (Session_server_impl_t*, // Unused at this level; it is for sub-classes' log-in steps.
+        size_t mq_msg_size_limit,
         Channels* init_channels_by_srv_req, Mdt_reader_ptr* mdt_from_cli_or_null, Channels* init_channels_by_cli_req,
         Cli_app_lookup_func&& cli_app_lookup_func, Cli_namespace_func&& cli_namespace_func,
         Pre_rsp_setup_func&& pre_rsp_setup_func,
@@ -1914,7 +1927,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
   m_log_in_on_done_func = std::move(on_done_func); // May be invoked from thread W or thread U (dtor) (it's a race).
 
   // Kick off all work from thread W to avoid concurrency.
-  m_async_worker.post([this, srv,
+  m_async_worker.post([this, mq_msg_size_limit,
                        init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
                        cli_app_lookup_func = std::move(cli_app_lookup_func),
                        cli_namespace_func = std::move(cli_namespace_func),
@@ -1925,18 +1938,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
   {
     // We are in thread W.
 
-    if constexpr(S_MQS_ENABLED)
-    {
-      assert(m_mq_msg_size_limit_func.empty() && "Did we call async_accept_log_in() more than once?  Bug?");
-
-      /* (See this guy's doc header, if you're wondering why we're storing this functor and not "just" saving
-       * an `m_srv = srv` or some-such.) */
-      m_mq_msg_size_limit_func = [srv]() -> size_t { return srv->mq_msg_size_limit(); };
-    }
-    else // In this instantiation `srv` has no use; it is captured for the other one.  Pacify the compiler:
-    {
-      static_cast<void>(srv);
-    }
+    m_mq_msg_size_limit = mq_msg_size_limit; // (Unused unless S_MQS_ENABLED.)
 
     /* We'll want to check these OS-reported remote-process credentials against something during the log-in
      * procedure that is coming next; per remote_peer_process_credentials() doc header it's best to call it
@@ -1955,7 +1957,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
     {
       FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in request: We have the freshly-accepted "
                        "master socket stream [" << m_master_sock_stm << "]; and "
-                       "then obtaining OS-reported peer process credentials immediately succeded yielding "
+                       "then obtaining OS-reported peer process credentials immediately succeeded yielding "
                        "[" << os_proc_creds << "], but trying to query the executable-invoked-as (binary name) "
                        "value failed ([" << err_code << "] [" << err_code.message() << "]) (e.g., is it still "
                        "running?).  Shall close stream and execute handler.");
@@ -2015,7 +2017,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
     });
 
     /* Let's overview our task as the session-opening server.  We do the other side of what Client_session_impl does
-     * in it async_connect() flow, but we have one fewer phase: we already have the connected Native_socket_stream
+     * in its async_connect() flow, but we have one fewer phase: we already have the connected Native_socket_stream
      * and even have subsumed it in a Channel and even have subsumed *that* in a struc::Channel already.
      * So we just need to do the server side of the log-in.  It may help to follow along that part of the code
      * in Client_session.
@@ -2135,7 +2137,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                   /* Nice, the other side's Client_app is valid and allowed.  Run safety checks on claimed_proc_creds;
                    * they must reconfirm the Client_app they mean is the Client_app we know by checking for consistency
                    * of the values against our Client_app config; plus ensure consistency by checking against the
-                   * OS-reported values (in case it's some kind snafu or spoofing or who knows). */
+                   * OS-reported values (in case it's some kind of snafu or spoofing or who knows). */
                   if ((claimed_proc_creds != os_proc_creds)
                       || (Base::cli_app_ptr()->m_exec_path.string() != os_proc_invoked_as)
                       || (Base::cli_app_ptr()->m_user_id != claimed_proc_creds.user_id())
@@ -2179,7 +2181,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                     else // if (!(err_code = pre_rsp_setup_func()))
                     {
                       /* Cool then.  We can send the log-in response.  Now is a great time to 1, fish out the
-                       * cli->srv metadata (to pass set out-arg to before successful user-handler execution);
+                       * cli->srv metadata (to set the out-arg to, before successful user-handler execution);
                        * 2, ask local user (via in-arg function) how many channels it wants opened (they need
                        * various cli->srv info to make this decision); 3, compute srv->cli metadata
                        * (they need... ditto).  This stuff cannot fail. */
@@ -2271,7 +2273,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                                       "allow-list for the present server-app [" << Base::m_srv_app_ref << "].  "
                                       "Everything matches.  "
                                       "Log-in response, including saved cli-namespace "
-                                      "[" << Base ::cli_namespace() << "], sent OK.  "
+                                      "[" << Base::cli_namespace() << "], sent OK.  "
                                       "Init-channel count expected is [" << n_init_channels << "]; of these "
                                       "[" << n_init_channels_by_cli_req << "] requested by opposing client.  "
                                       "If 0: Will go to almost-PEER state and report to user via on-accept-log-in "
@@ -2346,9 +2348,28 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
           open_channel_root.setServerToClientMqAbsNameOrEmpty(mq_name_s2c_or_none.str());
 
           /* Expect quick reply to the last one (we don't even check contents; it's just an ack, so
-           * `ok` = <it returned non-null>).  @todo Consider using timeout sync_request() overload just in case. */
+           * `ok` = <it returned non-null>).
+           *
+           * About the timeout: An unbuggy/working opposing Client_session replies promptly (from its own internal
+           * thread, before any user code runs); and one that is entirely unresponsive stops auto-pinging, so our
+           * idle timer would hose the channel and end the wait anyway.  So without a timeout the wait could be
+           * unbounded only if the peer's pinging continued while its reply never came -- i.e., a bug over there.
+           * As usual w/r/t misbehavior of the (trusted) opposing Flow-IPC peer, we handle this on a best-effort
+           * basis: the timeout merely bounds the wait (making any user-facing stall finite -- e.g., our dtor and
+           * Session_server's, which joins incomplete sessions like *this); it does not make it prompt.  Hanging
+           * for tens of seconds, *formally* speaking, may or may not break some contract, but practically speaking
+           * it could mean, e.g., that Session_server would stall for that time -- it's informally speaking broken
+           * behavior anyway.  We're just putting a cap on it at least because why not.  Even that said: reiterating:
+           * sync_request() would likely early-return due to auto-pinging (if not due to socket error or built-in
+           * liveness check/PEER_PROCESS_NO_LONGER_EXISTS); so in the unlikely hypothetical this shouldn't hang.
+           * This comment is arguably too long, but just we don't want this timeout arg's
+           * centrality to be overestimated by the reader/maintainer.
+           *
+           * @todo Consider async_request() (with a timeout) instead, for robustness, possibly promptness; more
+           * asynchrony though. */
           ok = (idx == (n_init_channels - 1))
-                 ? bool(m_master_channel->sync_request(&open_channel_req_msg, nullptr, &err_code))
+                 ? bool(m_master_channel->sync_request(&open_channel_req_msg, nullptr,
+                                                       Base::S_OPEN_CHANNEL_TIMEOUT, &err_code))
                  : (m_master_channel->send(&open_channel_req_msg, nullptr, &err_code)
                       && (!err_code));
         } // for (idx in n_init_channels)
@@ -2386,7 +2407,8 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
             }
           }
           assert(idx == n_init_channels);
-          // OK: Channel out-args all the way from async_connect() have been set.  Now same for mdt; invoke handler.
+          /* OK: Channel out-args all the way from Session_server::async_accept() have been set.  Now same for mdt;
+           * invoke handler. */
 
           if (mdt_from_cli_or_null)
           {
@@ -2415,13 +2437,13 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
           // Again: As promised in the various error paths above: error => end the short-lived master channel.
           m_master_channel.reset();
 
-          FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: A send() of an init-channel's info "
-                           "failed (details logged above).  "
+          FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Acquiring resources for, or sending, an "
+                           "init-channel's info failed (details logged above).  "
                            "Closing session master channel and reporting to user via "
                            "on-accept-log-in handler.");
         } // else if (!ok)
 
-        // err_code may me truthy or falsy.
+        // err_code may be truthy or falsy.
         m_log_in_on_done_func(err_code);
         FLOW_LOG_TRACE("Handler finished.");
         m_log_in_on_done_func.clear();
@@ -2445,8 +2467,8 @@ void CLASS_SRV_SESSION_IMPL::on_master_channel_error(const Error_code& err_code)
 {
   // We are in thread W.
 
-  /* (If you are comparing this to Client_session::on_master_channel_error(), you might notice this is a lot simpler
-   * (at least in the log-in phase); that is because Client_session supports multiple async_connect()s in series
+  /* (If you are comparing this to Client_session_impl::on_master_channel_error(), you might notice this is a lot
+   * simpler (at least in the log-in phase); that is because Client_session supports multiple async_connect()s in series
    * (if 1 or more fail), so m_master_channel can be nullified and then again constructed.  In our case
    * async_accept_log_in() is a private API, made public via Server_session_dtl to Session_server
    * only, and therefore (due to having a limited internal use case) can be only called 1x, by contract.

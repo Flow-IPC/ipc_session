@@ -32,7 +32,7 @@ namespace ipc::session::sync_io
  *     `Session_server` *and* `Server_session` of any kind.  For example, you may find this convenient
  *     if your event loop is an old-school reactor using `poll()` or `epoll_wait()`.  This affects exactly the
  *     following APIs:
- *     - `Session_server::async_accept()`,
+ *     - `Session_server::async_accept()`.
  *   - This Session_server_adapter *adapts* a `Session_server` constructed and stored within `*this`.
  *     All APIs excluding the above -- that is to say all non-async APIs -- are to be invoked via core() accessor.
  *     - Trying to use `core()->async_accept()` leads to undefined behavior.
@@ -48,11 +48,11 @@ namespace ipc::session::sync_io
  * To use it:
  *   - Construct it explicitly.  The ctor signature is exactly identical to that of session::Session_server.
  *   - Set up `sync_io` pattern using start_ops() (and if needed precede it with replace_event_wait_handles()).
- *   - Use async_accept() in similar fashion to async-I/O `Server_session` supplying a completion handler
+ *   - Use async_accept() in similar fashion to async-I/O `Session_server` supplying a completion handler
  *     (though it will be invoked synchronously per `sync_io` pattern).
  *     - As normal, construct a blank `Server_session` to pass as the target of async_accept().
  *       The type of this object shall be Session_server_adapter::Session_obj; it shall be a concrete
- *       type of the class template Session_server_adapter.
+ *       type of the class template Server_session_adapter.
  *   - On successful accept:
  *     - See doc header for Server_session_adapter on what to do next.  Spoiler alert:
  *       Server_session_adapter::start_ops(),
@@ -67,7 +67,7 @@ namespace ipc::session::sync_io
  * @tparam Session_server
  *         The async-I/O `Session_server` concrete type being adapted.  As of this writing that would be one of
  *         at least: `session::Session_server<knobs>`, `session::shm::classic::Session_server<knobs>`,
- *         `session::shm::jemalloc::Session_server<knobs>`.
+ *         `session::shm::arena_lend::jemalloc::Session_server<knobs>`.
  */
 template<typename Session_server>
 class Session_server_adapter
@@ -133,10 +133,10 @@ public:
    * @tparam Task_err
    *         See above.
    * @param target_session
-   *        Pointer to #Session_obj which shall be assigned an almost-PEER-state (open, requires
-   *        Server_session_adapter::init_handlers() to enter PEER state) as `on_done_func()`
-   *        is called.  Not touched on error.  Recommend default-constructing a #Session_obj and passing
-   *        pointer thereto here.
+   *        Pointer to #Session_obj.  As in Session_server::async_accept(), its adapted `Server_session` is made
+   *        as-if default-cted at once, then on success move-assigned an almost-PEER-state session (requiring
+   *        Server_session_adapter::init_handlers() to enter PEER state) as `on_done_func()` is called.
+   *        Recommend default-constructing a #Session_obj and passing pointer thereto here.
    * @param on_done_func
    *        See above.
    * @return `true` on successful start to async-accept; `false` if called before start_ops().
@@ -306,7 +306,7 @@ bool Session_server_adapter<Session_server>::start_ops(Event_wait_func_t&& ev_wa
   return true;
 
   // That's it for now.  async_accept() will start an actual async-wait.
-} // Session_adapter::start_ops()
+} // Session_server_adapter::start_ops()
 
 template<typename Session_server>
 template<typename Create_ev_wait_hndl_func>
@@ -325,7 +325,7 @@ bool Session_server_adapter<Session_server>::replace_event_wait_handles
 
   FLOW_LOG_INFO("Session_server_adapter [" << *this << "]: "
                 "Replacing event-wait handles (probably to replace underlying "
-                "execution context without outside event loop's boost.asio Task_engine or similar).");
+                "execution context with outside event loop's boost.asio Task_engine or similar).");
 
   assert(m_ev_wait_hndl.is_open());
 
@@ -341,6 +341,14 @@ template<typename Task_err>
 bool Session_server_adapter<Session_server>::async_accept(Session_obj* target_session, Task_err&& on_done_func)
 {
   using util::Task;
+
+  if (m_ev_wait_func.empty())
+  {
+    FLOW_LOG_WARNING("Session_server_adapter [" << *this << "]: "
+                     "Async-accept requested before start_ops().  Ignoring.");
+    return false;
+  }
+  // else
 
   if (!m_on_done_func_or_empty.empty())
   {
@@ -375,6 +383,14 @@ bool Session_server_adapter<Session_server>::async_accept
         Task_err&& on_done_func)
 {
   using util::Task;
+
+  if (m_ev_wait_func.empty())
+  {
+    FLOW_LOG_WARNING("Session_server_adapter [" << *this << "]: "
+                     "Async-accept requested before start_ops().  Ignoring.");
+    return false;
+  }
+  // else
 
   if (!m_on_done_func_or_empty.empty())
   {

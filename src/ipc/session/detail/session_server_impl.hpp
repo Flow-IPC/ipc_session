@@ -422,21 +422,21 @@ private:
     mutable Mutex m_mutex;
 
     /**
-     * `false` until dtor_stop_accepting() fences off the log-in handlers from #m_incomplete_sessions; `true`
-     * thereafter.  Written (once) only by dtor_stop_accepting() in thread U, under #m_mutex; read by the log-in
-     * handlers (threads Ws) under #m_mutex.  (Thread U may read it without locking, being its only writer.)
+     * `false` until dtor_stop_accepting() fences off the log-in handlers from `m_incomplete_sessions`; `true`
+     * thereafter.  Written (once) only by dtor_stop_accepting() in thread U, under `m_mutex`; read by the log-in
+     * handlers (threads Ws) under `m_mutex`.  (Thread U may read it without locking, being its only writer.)
      */
     bool m_stopping = false;
 
     /**
-     * The number of log-in handlers (threads Ws) that have passed the #m_stopping check (it being `false`) and
-     * erased their session from #m_incomplete_sessions but have not yet finished: they may still post to
-     * #m_incomplete_session_graveyard, log via `*this`, and invoke the user's on-done handler.  dtor_stop_accepting()
-     * waits for this to reach 0 (after setting #m_stopping, so it cannot grow).  Protected by #m_mutex.
+     * The number of log-in handlers (threads Ws) that have passed the `m_stopping` check (it being `false`) and
+     * erased their session from `m_incomplete_sessions` but have not yet finished: they may still post to
+     * `m_incomplete_session_graveyard`, log via `*this`, and invoke the user's on-done handler.  dtor_stop_accepting()
+     * waits for this to reach 0 (after setting `m_stopping`, so it cannot grow).  Protected by `m_mutex`.
      */
     unsigned int m_n_handlers_active = 0;
 
-    /// Notified whenever #m_n_handlers_active reaches 0.  Used with #m_mutex.
+    /// Notified whenever `m_n_handlers_active` reaches 0.  Used with `m_mutex`.
     boost::condition_variable m_handlers_done;
 
     /**
@@ -976,17 +976,44 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
    * does not interact with other Ws.  Wa means they invoked us directly from our own completion handler
    * again, albeit only on error would that be from Wa; anyway Native_socket_stream_acceptor allows it. */
 
+  /* As promised: *target_session becomes as-if default-cted right now, synchronously in the calling thread; whatever
+   * it held (if anything) is destroyed here, just as if the user had done so before calling us.
+   *
+   * Rationale for that contract: A successful log-in later move-assigns into *target_session from thread Ws; if it
+   * still held a PEER-state Session then, that _session_impl's dtor would run in Ws -- where it could even block
+   * arbitrarily (at least: SHM-jemalloc _session_impl's dtor awaiting the opposing peer's <=> why Graceful_finisher
+   * exists originally), stalling that thread and our own dtor (which awaits that handler's completion).  Whether
+   * that's "formally" allowed isn't super-salient; we really just don't want to have to worry/reason about
+   * PEER-state _session_impl dtors potentially running at weird times.  There's no great need for users to target
+   * perfectly good `Session`s via async_accept() anyway; this makes life easier to understand for them and for us. */
+  *target_session = Server_session_obj{};
+
   Task_asio_err on_done_func{std::move(on_done_handler)};
+  // Snapshot it now (see mq_msg_size_limit() mutator thread safety); the new session shall use this value for good.
+  const auto mq_msg_size_limit_snapshot = m_mq_msg_size_limit;
   auto sock_stm = make_shared<transport::sync_io::Native_socket_stream>(); // Empty target socket stream.
   const auto sock_stm_raw = sock_stm.get();
+
+  /* The out-args other than *target_session: the session fills those in on its log-in success, before invoking our
+   * log-in handler -- which may nevertheless report operation-aborted (see its shutting-down path); while we
+   * promised to touch them only when reporting success.  So the session gets our own holders instead; the log-in
+   * handler moves their contents into the user's out-args if and only if it reports success.  (A null user out-arg
+   * becomes a null holder pointer, as its nullness has meaning to the session.) */
+  struct Log_in_out_args
+  {
+    Channels m_init_channels_by_srv_req;
+    Mdt_reader_ptr m_mdt_from_cli;
+    Channels m_init_channels_by_cli_req;
+  };
+  const auto log_in_out_args = make_shared<Log_in_out_args>();
 
   FLOW_LOG_INFO("Session acceptor [" << *this << "]: Async-accept request: Immediately issuing socket stream "
                 "acceptor async-accept as step 1.  If that async-succeeds, we will complete the login asynchronously; "
                 "if that succeeds we will finally emit the ready-to-go session to user via handler.");
   m_state->m_master_sock_acceptor->async_accept
     (sock_stm_raw,
-     [this, target_session, init_channels_by_srv_req, mdt_from_cli_or_null,
-      init_channels_by_cli_req,
+     [this, target_session, mq_msg_size_limit_snapshot, init_channels_by_srv_req, mdt_from_cli_or_null,
+      init_channels_by_cli_req, log_in_out_args,
       n_init_channels_by_srv_req_func = std::move(n_init_channels_by_srv_req_func),
       mdt_load_func = std::move(mdt_load_func),
       sock_stm = std::move(sock_stm),
@@ -1097,9 +1124,11 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
 
     Server_session_dtl<Server_session_obj>{ *incomplete_session }.async_accept_log_in
       (this,
-       init_channels_by_srv_req, // Our async out-arg for them to set on success (before on_done_func(Error_code{})).
-       mdt_from_cli_or_null, // Ditto.
-       init_channels_by_cli_req, // Ditto.
+       mq_msg_size_limit_snapshot,
+       // Async out-args for them to set on success (before on_done_func(Error_code{})): our holders (see above).
+       init_channels_by_srv_req ? &log_in_out_args->m_init_channels_by_srv_req : nullptr,
+       mdt_from_cli_or_null ? &log_in_out_args->m_mdt_from_cli : nullptr,
+       init_channels_by_cli_req ? &log_in_out_args->m_init_channels_by_cli_req : nullptr,
 
        std::move(cli_app_lookup_func), // Look up Client_app by name and give it to them!
        std::move(cli_namespace_func), // Generate new per-session namespace and give it to them!
@@ -1109,7 +1138,8 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
        std::move(mdt_load_func), // Let caller fill out srv->cli metadata!
 
        [this, incomplete_session_observer = Incomplete_session_observer{incomplete_session},
-        target_session, on_done_func = std::move(on_done_func)]
+        target_session, init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req, log_in_out_args,
+        on_done_func = std::move(on_done_func)]
          (const Error_code& async_err_code)
     {
       // We are in thread Ws (unspecified; really Server_session worker thread).
@@ -1141,9 +1171,10 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
       if (shutting_down)
       {
         /* As promised by our dtor contract: pending handlers fire with operation-aborted -- even if this log-in
-         * happened to complete (successfully or not) just as shutdown began.  *target_session is untouched.
-         * incomplete_session (our ref) is not the last one (m_incomplete_sessions still holds one), so letting it
-         * go out of scope here is fine. */
+         * happened to complete (successfully or not) just as shutdown began.  *target_session stays as-if
+         * default-cted (see top of async_accept()); nor are the other out-args touched (the session could only have
+         * filled our holders).  incomplete_session (our ref) is not the last one (m_incomplete_sessions still holds
+         * one), so letting it go out of scope here is fine. */
         on_done_func(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER);
         return;
       }
@@ -1178,6 +1209,19 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
         FLOW_LOG_INFO("Session acceptor [" << *this << "]: Async-accept request: Successfully resulted in logged-in "
                       "server session [" << *incomplete_session << "].  Feeding to user via callback.");
 
+        // Only now do we touch the out-args (see log_in_out_args comment above).
+        if (init_channels_by_srv_req)
+        {
+          *init_channels_by_srv_req = std::move(log_in_out_args->m_init_channels_by_srv_req);
+        }
+        if (mdt_from_cli_or_null)
+        {
+          *mdt_from_cli_or_null = std::move(log_in_out_args->m_mdt_from_cli);
+        }
+        if (init_channels_by_cli_req)
+        {
+          *init_channels_by_cli_req = std::move(log_in_out_args->m_init_channels_by_cli_req);
+        }
         *target_session = std::move(*incomplete_session);
         // *incomplete_session is now as-if default-cted.
 
@@ -1221,7 +1265,7 @@ void CLASS_SESSION_SERVER_IMPL::mq_msg_size_limit(size_t limit)
 
   FLOW_LOG_INFO("MQ msg-size limit changed via user call: [" << prev_limit << "] => round-up[" << limit << "] = "
                 "[" << m_mq_msg_size_limit << "]; 0 = we choose based on best struc::Channel perf.  "
-                "This affects all subsequently created channels including in already-existing session(s) if any.");
+                "This affects sessions from subsequent async_accept()s; existing ones keep their values.");
 }
 
 TEMPLATE_SESSION_SERVER_IMPL

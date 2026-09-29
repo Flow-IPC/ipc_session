@@ -359,9 +359,14 @@ public:
    * @tparam Task_err
    *         Handler type matching signature of `flow::async::Task_asio_err`.
    * @param target_session
-   *        Pointer to Server_session which shall be assigned an almost-PEER-state (open, requires
-   *        Server_session::init_handlers() to enter PEER state) as `on_done_func()`
-   *        is called.  Not touched on error.
+   *        Pointer to the target Server_session.  It is made as-if default-cted synchronously, immediately at
+   *        entry to this method, before the accept procedure asynchronously proceeds -- as-if you had called
+   *        `*target_session = {}` just before calling this method.  If `*target_session` is already in NULL state,
+   *        which we informally recommend, that step is a no-op.  Otherwise the considerable resources of
+   *        of the PEER- or almost-PEER-state `Session` are freed per `*this` class's dtor docs.  After that,
+   *        asynchronously: On success `*target_session` becomes an almost-PEER-state session (open; requires
+   *        `init_handlers() to enter PEER state) just before `on_done_func()` is called.  On failure
+   *        `*target_session` remains in NULL state (as-if default-cted).
    * @param on_done_func
    *        Completion handler.  See above.  The captured state in this function object shall be freed shortly upon
    *        its completed execution from the unspecified thread.
@@ -458,7 +463,7 @@ public:
    * @param mdt_load_func
    *        See `Mdt_load_func`.
    * @param on_done_func
-   *        See other async_accept() overload.  Note the above target (pointer) args are touched
+   *        See other async_accept() overload.  Note the above out-args, other than `target_session`, are touched
    *        only if falsy #Error_code is passed to this handler.
    */
   template<typename Task_err,
@@ -473,7 +478,8 @@ public:
 
   /**
    * Generated if and only if `S_MQS_ENABLED`, this is the last-specified user override for the max MQ message size
-   * for any subsequently-opened `Channel` in any `Session` spawned from `*this` session-server.
+   * for the `Channel`s of `Session`s spawned from `*this` session-server.  Each `Session` uses the value as of its
+   * async_accept() call, for all its `Channel`s.
    *
    * If zero: we will choose a reasonable value (1) depending on whether we are SHM-enabled and (2) based on the
    * assumption that the `Channel`s shall be each upgraded-to a SHM-enabled struc::Channel.
@@ -496,26 +502,11 @@ public:
   size_t mq_msg_size_limit() const;
 
   /**
-   * Generated if and only if `S_MQS_ENABLED`, this sets the value returned by eponymous accessor; that is this
-   * changes the override's value.
+   * Generated if and only if `S_MQS_ENABLED`, this sets the value returned by eponymous accessor.  It affects
+   * `Session`s from subsequent async_accept() calls; existing ones (and those being accepted) keep their value.
    *
    * ### Thread safety ###
-   * It is not safe to call it concurrently with `this->mq_msg_size_limit()` accessor or mutator.  It's not safe to call
-   * this when a `this->async_accept()` is outstanding, and either side requests init-channel(s) to be opened.
-   * It is not safe to call this when a `*this`-spawned `Session` exists, and either this or the opposing side
-   * (or both) is/are configured to allow passively-opening channels, and the other side might issue an active-open.
-   *
-   * That was an attempt to, in English, formally explain what's not safe.  Perhaps it's easier to understand the
-   * following informal explanation: Anytime a `Session` (spawned from `*this` session-server) must open a channel,
-   * `this->mq_msg_size_limit()` accessor is invoked, and therefore calling the mutator is not safe.  So the question
-   * is basically: when is a channel possibly opened?  Answers: Channels are opened during the connect/accept phase of
-   * a session (a/k/a init-channels); and/or when a side invokes open_channel() (active-open).  Init-channels are
-   * requested via async_accept() and/or `"Client_session::sync_connect()"` args.  open_channel() requests are honored
-   * only if the opposing side is configured with a passive-open handler (`Client_session`: via ctor; `Server_session`:
-   * via `.init_handlers()`).
-   *
-   * If issued before any async_accept(): No problem.  If issued when no `Session` from `*this` is alive, and there's
-   * no async_accept() pending: No problem.  Otherwise: depends.
+   * It is not safe to call it concurrently with the accessor, the mutator, or async_accept().
    *
    * @param limit
    *        See accessor overload; it explains the meaning of this value.  Note zero is a special value.
