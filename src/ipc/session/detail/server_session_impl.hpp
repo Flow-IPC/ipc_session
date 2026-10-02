@@ -2096,7 +2096,9 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
             } // if (msg_root.shmType, mqType, ... are not OK)
             else // if (msg_root.shmType, mqType, ... are OK)
             {
+              const string cli_app_name{msg_root.getOwnApp().getName()};
               n_init_channels_by_cli_req = msg_root.getNumInitChannelsByCliReq();
+
               if ((n_init_channels_by_cli_req != 0) && (!init_channels_by_cli_req))
               {
                 FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received; "
@@ -2109,12 +2111,22 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
               else // if (n_init_channels_by_cli_req is OK)
               {
                 const auto& claimed_proc_creds = m_master_channel->remote_peer_process_credentials();
-                assert((&claimed_proc_creds != &NULL_PROCESS_CREDENTIALS) &&
-                       "struc::Channel::remote_peer_process_credentials() would return (here) null only if "
-                         "no session-master-channel message handler has been executed (but we are in one), or "
-                         "if the struc::Channel were hosed (but if it were, we would not be here either).");
+                if (&claimed_proc_creds == &NULL_PROCESS_CREDENTIALS)
+                {
+                  /* (While it looks arguably a bit odd, this is no different from the relatively common scenario
+                   * where we try something like m_master_channel->send(), but it returns false/null/sentinel.
+                   * Like it says, it just means error handler will deal with it, and meanwhile there's no
+                   * point for us to continue, even if we could get the claimed_proc_creds info somehow. */
+                  FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received "
+                                   "(OS-reported client process creds [" << os_proc_creds << "], "
+                                   "OS-reported invoked-as name [" << os_proc_invoked_as << "], "
+                                   "cli-app-name [" << cli_app_name << "]); but recently the session master channel "
+                                   "was hosed; this will soon hose the budding session via channel's on-error "
+                                   "handler.  Meanwhile we bail.");
+                  return;
+                }
+                // else
 
-                const string cli_app_name{msg_root.getOwnApp().getName()};
                 const Client_app* const cli_app_ptr_or_null = cli_app_lookup_func(cli_app_name);
 
                 if ((!cli_app_ptr_or_null) ||
