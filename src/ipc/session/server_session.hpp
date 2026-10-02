@@ -53,6 +53,9 @@ namespace ipc::session
  * interest.  The last two sentences describe the situation identically for Client_session_mv as well (see its
  * doc header for context).
  *
+ * Regarding when to destroy `*this`, relative to the objects around it (its channels et al; the Session_server that
+ * produced it): see Session_server doc header, section "How to use: Lifetime recommendations and requirements."
+ *
  * Summary hierarchy (contrast with similar spot in Client_session_mv doc header):
  *   - Session_mv (Session concept impl)
  *   - ^-- Server_session_mv (adds init_handlers())
@@ -277,7 +280,7 @@ private:
    *         as Session_base::set_cli_namespace() is required before #Server_session can be in PEER state and available
    *         to the public user.
    * @tparam Pre_rsp_setup_func
-   *         Function type with signature `Error_code F()`.
+   *         Function type with signature `Error_code F(const Client_app& cli_app)`.
    * @tparam N_init_channels_by_srv_req_func
    *         See Session_server::async_accept().  Type and arg value forwarded from there.
    * @tparam Mdt_load_func
@@ -307,8 +310,9 @@ private:
    *        See `Cli_namespace_func`.
    * @param pre_rsp_setup_func
    *        Invoked just before sending successful log-in response to opposing client, which completes the log-in.
-   *        It takes no arguments -- but all `*this` accessors up to/including `cli_app_ptr()` shall return
-   *        real values -- and shall return falsy on success; or the reason for failure as #Error_code.
+   *        It takes the opposing Client_app (`*cli_app_ptr()`, by then known; all `*this` accessors up to/including
+   *        `cli_app_ptr()` shall return real values) and shall return falsy on success; or the reason for failure
+   *        as #Error_code.
    *        In the latter case this method shall emit that code as the reason for overall failure.
    *        This can be used for setting up resources, such as SHM arena(s), that the client shall count
    *        on being available (perhaps at known #Shared_name based on `*this` accessor values).

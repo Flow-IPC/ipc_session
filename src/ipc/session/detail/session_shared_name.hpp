@@ -192,4 +192,20 @@ bool decompose_conventional_shared_name(const Shared_name& name,
  */
 Shared_name build_conventional_shared_name_prefix(const Shared_name& resource_type, const Shared_name& srv_app_name);
 
+/**
+ * Returns a client-namespace value (see Session_base::cli_namespace()) not previously returned in this process; for
+ * a session-server to assign to a session it is opening.  Thread-safe.
+ *
+ * ### Rationale ###
+ * Why unique process-wide and not merely per `Session_server`?  A later `Session_server` for the same Server_app in
+ * the same process has the same server namespace (the PID); so, were the client-namespaces to restart, it would
+ * produce the per-session resource names (MQs, SHM pools) of the earlier one's sessions.  Those must no longer exist
+ * by then, per the documented rules as of this writing (and multiple sequential `_server`s in a process is itself
+ * exotic); but this way no collision is possible, even if they do.  It's also probably nice for grokking logs/reporting
+ * after the fact (an object name for the same process will not be used more than once).
+ *
+ * @return See above.
+ */
+Shared_name next_cli_namespace();
+
 } // namespace ipc::session

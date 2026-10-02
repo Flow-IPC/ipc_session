@@ -55,6 +55,24 @@ namespace ipc::session
  * for how to operate it.  Spoiler alert: you must still call `Server_session::init_handlers()`; at which point
  * the #Server_session is a Session concept impl in PEER state.
  *
+ * ### How to use: Lifetime recommendations and requirements ###
+ * The lifetime tenets, in one place.  (The Manual's session-teardown page discusses them at more length.)
+ *   -# *Per-session things before their `Session`.*  Channels, structured messages -- and, with a SHM-enabled
+ *      variant such as session::shm::classic::Session_server, SHM handles and objects -- are destroyed first; then
+ *      the `Session`.  (Likewise on the client side.)
+ *   -# *`Session`s before their `Session_server`.*  Construction goes `*this`, then sessions; destruction the
+ *      reverse.
+ *   -# *One `Session_server` per Server_app at a time.*  A new one may follow an old one -- typically because the
+ *      session-server process restarted -- but never while any `Session` or channel from the old one still exists:
+ *      the new one's startup cleanup removes their kernel-persistent names (MQs, SHM pools).
+ *
+ * Some departures from the above do work; informally we recommend against relying on them, as doing so tends to
+ * indicate a design that will cause pain later.  Namely: a channel outliving its `Session` (they are formally
+ * independent; though if the session was hosed by the opposing side, the channel usually goes down with it);
+ * a #Server_session outliving `*this` (it keeps working -- with a SHM-enabled variant, its app-scope arena included;
+ * a `Server_session` emitted by a `*this` whose destructor is already running (see ~Session_server()) merely needs
+ * destroying); and a `Session_server` following another within one process.
+ *
  * ### Error handling ###
  * The model followed is the typical boost.asio-like one: Each async_accept() takes a handler, F, and it is
  * eventually invoked no matter what: either with a falsy (success) #Error_code, or with a truthy (fail) one.
@@ -124,8 +142,8 @@ namespace ipc::session
  * You *may* invoke async_accept() directly from within another async_accept()-passed handler.
  * (Informally we suggest you post all real handling onto your own thread(s).)
  *
- * However: async_accept()-passed user handlers may be invoked *concurrently to each other* (if 2+ async_accept()s are
- * outstanding).  It is your responsibility, then, to ensure you do not invoke 2+ async_accept()s concurrently.
+ * However: async_accept()-passed user handlers may be invoked *concurrently to each other* (if 2+ `async_accept()`s are
+ * outstanding).  It is your responsibility, then, to ensure you do not invoke 2+ `async_accept()`s concurrently.
  * (One way is to only have only 1 outstanding at any given time.  Another is to post all handling on your own thread.
  * Really informally we'd say it's best to do both.  Truly: we recommend this.)
  *
@@ -279,6 +297,9 @@ public:
    *
    * You must not call this from directly within a completion handler; else undefined behavior.
    *
+   * Regarding *when* to destroy `*this`, relative to the `Server_session`s it produced (and their channels et al):
+   * see class doc header, section "How to use: Lifetime recommendations and requirements."
+   *
    * Each pending completion handler will be called from an unspecified thread that is not the calling thread.
    * Any associated captured state for that handler will be freed shortly after the handler returns.
    *
@@ -362,10 +383,10 @@ public:
    *        Pointer to the target Server_session.  It is made as-if default-cted synchronously, immediately at
    *        entry to this method, before the accept procedure asynchronously proceeds -- as-if you had called
    *        `*target_session = {}` just before calling this method.  If `*target_session` is already in NULL state,
-   *        which we informally recommend, that step is a no-op.  Otherwise the considerable resources of
+   *        which we informally recommend, that step is a no-op.  Otherwise the considerable resources
    *        of the PEER- or almost-PEER-state `Session` are freed per `*this` class's dtor docs.  After that,
    *        asynchronously: On success `*target_session` becomes an almost-PEER-state session (open; requires
-   *        `init_handlers() to enter PEER state) just before `on_done_func()` is called.  On failure
+   *        `init_handlers()` to enter PEER state) just before `on_done_func()` is called.  On failure
    *        `*target_session` remains in NULL state (as-if default-cted).
    * @param on_done_func
    *        Completion handler.  See above.  The captured state in this function object shall be freed shortly upon

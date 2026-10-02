@@ -66,11 +66,21 @@
  *     never abort; the session survives.
  *   - A pending async_accept() aborted by Session_server destruction: its handler must fire, with the
  *     specific object-shutdown code.
+ *   - Session_server destroyed while session-opens are in flight (many rounds, varied timing, surplus clients):
+ *     each accept handler fires exactly once, with success or the object-shutdown code; every client connect
+ *     returns; emitted sessions outlive the server.  (ASAN/TSAN CI runs are the main detectors.)  Each round also
+ *     constructs a new Session_server for the same Server_app after the previous one's sessions are all gone.
  *   - Two async_accept()s outstanding concurrently, satisfied by two clients: both complete; the two
  *     resulting sessions coexist and are correctly paired.
  *   - The `sync_io`-pattern server-side adapters' API-misuse guards (Session_server_adapter::async_accept(),
  *     Server_session_adapter::init_handlers()): each misuse -- before start_ops(); on a not-yet-accepted session;
  *     duplicate; after the session error -- is refused with no residue, and the proper sequence then works.
+ *   - Session_server::mq_msg_size_limit() is per session, fixed at async_accept() time: a later change does not
+ *     affect channels an earlier-accepted session opens afterwards.
+ *   - async_accept() targeting a PEER-state session empties it synchronously at the call; a new client then
+ *     connects into that same object.
+ *   - A PEER-state Server_session outliving its Session_server keeps working: it opens a channel; SHM-backed, its
+ *     app-scope arena still round-trips a lend/borrow.
  *   - The graceful session-end choreography, in each direction (server-side session destroyed first;
  *     client-side first): the observing side's error handler fires exactly once -- for SHM-jemalloc
  *     with the specific SESSION_FINISHED code -- while the initiating side's handler never fires; the
@@ -276,13 +286,29 @@ public:
 #endif
   }
 
-  // Constructs (into `*pair.m_srv`) a Session_server for the pair's App universe; it listens immediately.
-  void start_server(Pair* pair)
+  /* Constructs (into `*pair.m_srv`) a Session_server for the pair's App universe; it listens immediately.
+   *
+   * SHM-classic: unless `cap_shm_pools` is false, each server's pool size limit is set to a small value (megabytes).
+   * (If the current impl by default commits the entire size of SHM-pool (as opposed to merely mapping it), the
+   * default size (gigabytes as of this writing) means (1) tests slow down ~100x, and (2) massive temporary RAM
+   * use, and (3) because of that possible async_accept() failure (hard no-space-left error in Linux at least).
+   * If the current impl commits only as-needed, then this is harmless.) */
+  void start_server(Pair* pair, [[maybe_unused]] bool cap_shm_pools = true)
   {
     pair->m_srv = std::make_unique<Session_server>(ipc_logger(),
                                                    pair->m_srv_apps.find(pair->m_srv_app.m_name)->second,
                                                    pair->m_cli_apps);
+    if constexpr(Pair::S_SHM_TYPE_OR_NONE == schema::ShmType::CLASSIC)
+    {
+      if (cap_shm_pools)
+      {
+        pair->m_srv->pool_size_limit_mi(S_SHM_CLASSIC_POOL_SIZE_LIMIT_MI);
+      }
+    }
   }
+
+  // See start_server().  Ample for this file's uses of SHM (a few small objects per test).
+  static constexpr size_t S_SHM_CLASSIC_POOL_SIZE_LIMIT_MI = 16;
 
   /* Holders for an async_accept() outcome (see post_accept()).  shared_ptr semantics on purpose: if a
    * test bails (ASSERT) with the accept still outstanding, the handler shall still fire eventually (at
@@ -1357,6 +1383,202 @@ TYPED_TEST_P(Session_connect_test, Accept_abort)
   pair.remove_server_persistent_bits(); // The server did run (briefly): the CNS file + mutex exist.
 }
 
+/* Session_server destroyed while session-opens are in flight: a regression test for its shutdown design (see
+ * Session_server_impl::dtor_stop_accepting()).  Each round: a fresh server; N_ACCEPTS async_accept()s posted;
+ * N_CLIENTS clients -- more than N_ACCEPTS, so the extras sit in the socket-acceptor's surplus queue -- each
+ * sync_connect() concurrently on its own thread; after a round-specific delay the server is destroyed.  Depending
+ * on timing that lands before any connect, among the socket-accepts, mid-log-in, or after some accepts completed.
+ * To spread the rounds over those regions regardless of the session type's log-in speed (or of a sanitizer's
+ * slowdown), the delays are not fixed: round 0 calibrates -- it lets all accepts complete, measuring how long that
+ * takes -- and each later round's delay is a fraction of that, from 0 to past 1.  Asserted per round:
+ *   - Each async_accept() handler fires exactly once; its code is success or the object-shutdown code (the dtor
+ *     contract's code for pending ones) -- nothing else.
+ *   - Every client's sync_connect() returns (success or error: timing-dependent, not asserted).
+ *   - Sessions emitted before the destruction outlive the server fine; they are destroyed afterwards (allowed per
+ *     the lifetime tenets in the Session_server doc header: such a session merely needs destroying).
+ * The detectors for the actual subject -- races between the dtor and in-flight log-in work, which reaches all 3
+ * server tiers (the base core; and SHM-provider sub-class state, via per-app setup and app_shm()) -- are, beyond
+ * crashes and asserts, the ASAN and TSAN pipeline cells.  Outcome tallies are logged for information.
+ *
+ * Also covered, as a by-product: each round's Session_server is a new one for the same Server_app, in the same
+ * process, constructed after the previous round's sessions and clients are all gone -- the allowed form of
+ * replacing a Session_server (tenet 3 in that doc header).
+ *
+ * Lifetimes: each accept's target Server_session is owned by the test body only (handlers capture a separate
+ * outcome holder), so no session can be destroyed on its own thread by a handler capture's release.  Server sides
+ * are destroyed before client sides: never init_handlers()ed, they have no SHM-jemalloc dtor gate; and each
+ * client, its peer gone, has no gate to wait on either. */
+TYPED_TEST_P(Session_connect_test, Server_destroyed_mid_flight)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using flow::async::Single_thread_task_loop;
+  using flow::async::Synchronicity;
+  using flow::util::ostream_op_string;
+  using flow::Fine_clock;
+  using flow::Fine_duration;
+  using boost::chrono::seconds;
+  using boost::chrono::milliseconds;
+  using boost::chrono::microseconds;
+  using boost::chrono::round;
+  using std::atomic;
+  using std::vector;
+
+  constexpr size_t N_ACCEPTS = 3;
+  constexpr size_t N_CLIENTS = 4;
+  constexpr size_t N_ROUNDS = 16; // Round 0 = calibration; the rest cycle through DELAY_FRACTIONS.
+  constexpr double DELAY_FRACTIONS[] = { 0, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 0.9, 1.1 }; // Of the calibrated duration.
+  constexpr size_t N_DELAY_FRACTIONS = sizeof(DELAY_FRACTIONS) / sizeof(DELAY_FRACTIONS[0]);
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("MidFlight");
+  pair.remove_server_persistent_bits(false);
+
+  // One thread per client, reused across rounds.
+  vector<std::unique_ptr<Single_thread_task_loop>> cli_threads;
+  for (size_t idx = 0; idx != N_CLIENTS; ++idx)
+  {
+    cli_threads.emplace_back(std::make_unique<Single_thread_task_loop>(nullptr, ostream_op_string("midFl", idx)));
+    cli_threads.back()->start();
+  }
+
+  struct Accept_outcome_slot
+  {
+    atomic<int> m_n_fired{0};
+    Error_code m_err; // Written before m_n_fired is incremented.
+  };
+  struct Cli_slot
+  {
+    Client_session m_cli;
+    bool m_ok = false;
+    Error_code m_err;
+    boost::promise<void> m_done;
+  };
+
+  size_t n_accept_ok = 0;
+  size_t n_accept_aborted = 0;
+  size_t n_cli_ok = 0;
+  size_t n_cli_err = 0;
+  Fine_duration calib_duration{}; // Round 0 measures it: clients launched => all N_ACCEPTS accepts completed.
+
+  for (size_t round_idx = 0; round_idx != N_ROUNDS; ++round_idx)
+  {
+    this->start_server(&pair);
+
+    vector<Server_session> srv_sessions(N_ACCEPTS); // Sized up front: the accepts hold pointers into it.
+    vector<boost::shared_ptr<Accept_outcome_slot>> accept_outcomes;
+    for (auto& srv_session : srv_sessions)
+    {
+      const auto outcome = boost::make_shared<Accept_outcome_slot>();
+      accept_outcomes.push_back(outcome);
+      pair.m_srv->async_accept(&srv_session, [outcome](const Error_code& err_code)
+      {
+        outcome->m_err = err_code;
+        ++outcome->m_n_fired;
+      });
+    }
+    const auto all_fired = [&]()
+    {
+      for (const auto& outcome : accept_outcomes)
+      {
+        if (outcome->m_n_fired.load() == 0)
+        {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    vector<boost::shared_ptr<Cli_slot>> clis;
+    for (size_t idx = 0; idx != N_CLIENTS; ++idx)
+    {
+      const auto slot = boost::make_shared<Cli_slot>();
+      slot->m_cli = Client_session{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
+      clis.push_back(slot);
+      cli_threads[idx]->post([slot]()
+      {
+        slot->m_ok = slot->m_cli.sync_connect(slot->m_cli.mdt_builder(), nullptr, nullptr, nullptr, &slot->m_err);
+        slot->m_done.set_value();
+      });
+    }
+
+    if (round_idx == 0)
+    {
+      // Calibration round: let everything complete, timing it; the server is destroyed only after that.
+      const auto start = Fine_clock::now();
+      for (size_t idx = 0; (idx != 10000) && (!all_fired()); ++idx)
+      {
+        flow::util::this_thread::sleep_for(milliseconds(1));
+      }
+      ASSERT_TRUE(all_fired()) << "Calibration round: not all accepts completed in time.";
+      calib_duration = Fine_clock::now() - start;
+      FLOW_LOG_INFO("Calibration round: [" << N_ACCEPTS << "] accepts completed in "
+                    "[" << round<microseconds>(calib_duration) << "]; later rounds destroy the server after "
+                    "fractions of that.");
+    }
+    else
+    {
+      flow::util::this_thread::sleep_for
+        (round<microseconds>(calib_duration * DELAY_FRACTIONS[(round_idx - 1) % N_DELAY_FRACTIONS]));
+    }
+    pair.m_srv.reset(); // The subject.
+
+    for (size_t idx = 0; idx != N_CLIENTS; ++idx)
+    {
+      auto& slot = *(clis[idx]);
+      ASSERT_EQ(slot.m_done.get_future().wait_for(seconds(10)), boost::future_status::ready)
+        << "Round [" << round_idx << "]: client [" << idx << "]'s sync_connect() did not return.";
+      EXPECT_TRUE(slot.m_ok) << "Round [" << round_idx << "]: client [" << idx << "].";
+      if (slot.m_err)
+      {
+        ++n_cli_err;
+      }
+      else
+      {
+        ++n_cli_ok;
+      }
+      // Flush: the task (and its capture) is gone after this; so the Client_session dies below, on this thread.
+      cli_threads[idx]->post([]() {}, Synchronicity::S_ASYNC_AND_AWAIT_CONCURRENT_COMPLETION);
+    }
+
+    /* Per the dtor contract pending handlers fire "ASAP" (in practice all have fired by the time the dtor returns);
+     * allow a moment. */
+    for (size_t idx = 0; (idx != 500) && (!all_fired()); ++idx)
+    {
+      flow::util::this_thread::sleep_for(milliseconds(10));
+    }
+    for (size_t idx = 0; idx != N_ACCEPTS; ++idx)
+    {
+      const auto& outcome = *(accept_outcomes[idx]);
+      EXPECT_EQ(outcome.m_n_fired.load(), 1) << "Round [" << round_idx << "]: accept [" << idx << "] handler firings.";
+      if (!outcome.m_err)
+      {
+        ++n_accept_ok;
+      }
+      else
+      {
+        EXPECT_TRUE(outcome.m_err == error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER)
+          << "Round [" << round_idx << "]: accept [" << idx << "]: expected success or the object-shutdown code; got: "
+             "[" << outcome.m_err << "] [" << outcome.m_err.message() << "].";
+        ++n_accept_aborted;
+      }
+    }
+
+    // The emitted sessions outlived their server; now destroy them: server sides first (see doc comment above).
+    srv_sessions.clear();
+    clis.clear();
+    pair.remove_server_persistent_bits();
+  } // for (round_idx)
+
+  FLOW_LOG_INFO("Over [" << N_ROUNDS << "] rounds (calibrated log-in duration for [" << N_ACCEPTS << "] accepts: "
+                "[" << round<microseconds>(calib_duration) << "]): accepts: [" << n_accept_ok << "] succeeded, "
+                "[" << n_accept_aborted << "] aborted by server destruction; client connects: [" << n_cli_ok << "] "
+                "succeeded, [" << n_cli_err << "] failed.");
+} // TYPED_TEST_P(Session_connect_test, Server_destroyed_mid_flight)
+
 /* Two async_accept()s outstanding simultaneously -- explicitly supported (each accept's handling is
  * independent per the impl design) -- then two clients connect: both accepts must complete, and the two
  * full sessions coexist.  Accept-to-connect pairing is FIFO in practice but deliberately not asserted;
@@ -1486,6 +1708,10 @@ TYPED_TEST_P(Session_connect_test, Sync_io_adapter_guards)
   auto srv = std::make_unique<Session_server_sio>(this->ipc_logger(),
                                                   pair.m_srv_apps.find(pair.m_srv_app.m_name)->second,
                                                   pair.m_cli_apps);
+  if constexpr(Pair::S_SHM_TYPE_OR_NONE == schema::ShmType::CLASSIC)
+  {
+    srv->core()->pool_size_limit_mi(TestFixture::S_SHM_CLASSIC_POOL_SIZE_LIMIT_MI); // See start_server().
+  }
   auto sess = std::make_unique<Server_session_sio>();
 
   // Handler outcome holders; shared_ptr for the usual reason (no handler may fire into dead locals).
@@ -1560,6 +1786,220 @@ TYPED_TEST_P(Session_connect_test, Sync_io_adapter_guards)
   pair.remove_server_persistent_bits();
 } // TYPED_TEST_P(Session_connect_test, Sync_io_adapter_guards)
 
+/* Session_server::mq_msg_size_limit() is fixed per session, as of that session's async_accept(): a change after a
+ * session was accepted applies to later-accepted sessions only -- not to channels the earlier session opens
+ * afterwards.  (Regression aspect: a session must never query its Session_server for the value at channel-open time;
+ * that would also make a session outliving its Session_server a use-after-free -- see Session_outlives_server.)
+ * Two sessions, accepted at limits A then B; then each actively opens a channel (the server side creates the MQs, so
+ * its per-session value is what counts), whose ends on both sides report the MQ max message size. */
+TYPED_TEST_P(Session_connect_test, Mq_msg_size_limit_per_session)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using Channel_obj = typename TestFixture::Channel_obj;
+  using boost::chrono::seconds;
+
+  // Both max-alignment multiples: set-and-read-back exact (see Server_knobs for the rounding behavior).
+  constexpr size_t LIMIT_A = 2048;
+  constexpr size_t LIMIT_B = 4096;
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("MqLimit");
+  pair.remove_server_persistent_bits(false);
+  this->start_server(&pair);
+
+  // Passive-open-capable clients: the server sessions actively open; each client's handler loads its slot.
+  struct Passive_open_slot
+  {
+    boost::promise<void> m_opened;
+    Channel_obj m_chan;
+  };
+  const auto make_client = [&](const boost::shared_ptr<Passive_open_slot>& slot)
+  {
+    return Client_session{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {},
+                          [slot](Channel_obj&& new_chan, auto&& /*mdt_reader*/)
+    {
+      slot->m_chan = std::move(new_chan);
+      slot->m_opened.set_value();
+    }};
+  };
+  const auto slot_a = boost::make_shared<Passive_open_slot>();
+  const auto slot_b = boost::make_shared<Passive_open_slot>();
+
+  pair.m_srv->mq_msg_size_limit(LIMIT_A);
+  ASSERT_EQ(pair.m_srv->mq_msg_size_limit(), LIMIT_A);
+  auto cli_a = make_client(slot_a);
+  Server_session srv_session_a;
+  this->connect_ok(&pair, &cli_a, &srv_session_a);
+
+  pair.m_srv->mq_msg_size_limit(LIMIT_B);
+  ASSERT_EQ(pair.m_srv->mq_msg_size_limit(), LIMIT_B);
+  auto cli_b = make_client(slot_b);
+  Server_session srv_session_b;
+  this->connect_ok(&pair, &cli_b, &srv_session_b);
+
+  FLOW_LOG_INFO("Session A accepted at limit [" << LIMIT_A << "], then session B at [" << LIMIT_B << "]; now each "
+                "opens a channel: A's must use A's limit despite the later change.");
+  const auto open_and_check = [&](Server_session& srv_session, const boost::shared_ptr<Passive_open_slot>& slot,
+                                  size_t expected_limit, const string& ctx)
+  {
+    Channel_obj chan;
+    Error_code chan_err;
+    ASSERT_TRUE(srv_session.open_channel(&chan, &chan_err)) << ctx;
+    ASSERT_FALSE(chan_err) << ctx << ": [" << chan_err << "] [" << chan_err.message() << "].";
+    ASSERT_EQ(slot->m_opened.get_future().wait_for(seconds(5)), boost::future_status::ready) << ctx;
+    EXPECT_EQ(chan.send_blob_max_size(), expected_limit) << ctx << " (server end).";
+    EXPECT_EQ(slot->m_chan.send_blob_max_size(), expected_limit) << ctx << " (client end).";
+    slot->m_chan = Channel_obj{}; // Channel ends predecease the sessions.
+  };
+  open_and_check(srv_session_a, slot_a, LIMIT_A, "session A");
+  open_and_check(srv_session_b, slot_b, LIMIT_B, "session B");
+
+  pair.destroy_sessions(&cli_a, &srv_session_a);
+  pair.destroy_sessions(&cli_b, &srv_session_b);
+  pair.m_srv.reset();
+  pair.remove_server_persistent_bits();
+} // TYPED_TEST_P(Session_connect_test, Mq_msg_size_limit_per_session)
+
+/* async_accept() targeting a Server_session that is not in NULL state: per contract the target is made as-if
+ * default-cted synchronously, at the start of the call -- the old session's destruction happens right there, in the
+ * calling thread -- and the accept then proceeds into the emptied target.  Asserted: right after the call returns, the
+ * target is in NULL state (nil token); the old session's opposing client observes the session's end via its error
+ * handler; a new client then connects into that same target object, which reaches PEER paired with that client.
+ *
+ * SHM-jemalloc choreography: the old session's dtor (inside our async_accept() call) blocks until its opposing
+ * client's dtor begins -- so a helper thread destroys that client once the client has observed the hosing.  (The
+ * other session types do not block; the helper's action is then merely tidy.) */
+TYPED_TEST_P(Session_connect_test, Accept_target_reset)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using flow::async::Single_thread_task_loop;
+  using boost::chrono::seconds;
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("TargetReset");
+  pair.remove_server_persistent_bits(false);
+  this->start_server(&pair);
+
+  // Session 1: cli_1 <-> srv_session, PEER.  cli_1's error handler fulfills the promise once the session is hosed.
+  boost::promise<void> cli_1_hosed_promise;
+  const boost::shared_future<void> cli_1_hosed = cli_1_hosed_promise.get_future().share();
+  const auto cli_1_ptr
+    = boost::make_shared<Client_session>(this->ipc_logger(), pair.m_cli_app, pair.m_srv_app,
+                                         [&cli_1_hosed_promise](const Error_code&)
+                                           { cli_1_hosed_promise.set_value(); });
+  Server_session srv_session;
+  this->connect_ok(&pair, cli_1_ptr.get(), &srv_session);
+  ASSERT_FALSE(srv_session.session_token().is_nil());
+
+  // The helper: once cli_1 sees session 1 end, destroy cli_1 (see doc comment above regarding SHM-jemalloc).
+  Single_thread_task_loop ender_thread{nullptr, "tgt_ender"};
+  ender_thread.start();
+  ender_thread.post([cli_1_ptr, cli_1_hosed]()
+  {
+    cli_1_hosed.wait();
+    *cli_1_ptr = Client_session{};
+  });
+
+  FLOW_LOG_INFO("async_accept() targeting the PEER-state session: it must be emptied synchronously, right now.");
+  const auto outcome = this->post_accept(&pair, &srv_session);
+  EXPECT_TRUE(srv_session.session_token().is_nil()) << "Target must be as-if default-cted once async_accept() returns.";
+  EXPECT_EQ(cli_1_hosed.wait_for(seconds(5)), boost::future_status::ready)
+    << "Old session's opposing client did not observe the session's end.";
+  ender_thread.stop(); // Joins the helper: cli_1 is destroyed.
+
+  FLOW_LOG_INFO("A new client connects; the accept lands in the emptied target.");
+  Client_session cli_2{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {}};
+  Error_code err_code;
+  EXPECT_TRUE(cli_2.sync_connect(cli_2.mdt_builder(), nullptr, nullptr, nullptr, &err_code));
+  EXPECT_FALSE(err_code) << "[" << err_code << "] [" << err_code.message() << "].";
+  Error_code accept_err;
+  this->await_accept(outcome, &accept_err);
+  EXPECT_FALSE(accept_err);
+  srv_session.init_handlers([](const Error_code&) {});
+  EXPECT_FALSE(srv_session.session_token().is_nil());
+  EXPECT_EQ(srv_session.session_token(), cli_2.session_token());
+
+  pair.destroy_sessions(&cli_2, &srv_session);
+  pair.m_srv.reset();
+  pair.remove_server_persistent_bits();
+} // TYPED_TEST_P(Session_connect_test, Accept_target_reset)
+
+/* A PEER-state Server_session outliving its Session_server: allowed (see the lifetime tenets in Session_server doc
+ * header), and it must keep working.  Beyond merely remaining intact: it actively opens a channel (the MQ-size
+ * setting having been captured at accept time -- the regression aspect shared with Mq_msg_size_limit_per_session),
+ * with the client passive-accepting; and, for the SHM-backed types, the app-scope arena -- owned jointly by the
+ * Session_server and its sessions -- remains usable: an object constructed in it round-trips via lend/borrow. */
+TYPED_TEST_P(Session_connect_test, Session_outlives_server)
+{
+  FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
+  using Pair = typename TestFixture::Pair;
+  using Client_session = typename TestFixture::Client_session;
+  using Server_session = typename TestFixture::Server_session;
+  using Channel_obj = typename TestFixture::Channel_obj;
+  using boost::chrono::seconds;
+
+  const auto pair_ptr = boost::make_shared<Pair>();
+  auto& pair = *pair_ptr;
+  pair.populate_apps("Outlives");
+  pair.remove_server_persistent_bits(false);
+  this->start_server(&pair);
+
+  struct Passive_open_slot
+  {
+    boost::promise<void> m_opened;
+    Channel_obj m_chan;
+  };
+  const auto slot = boost::make_shared<Passive_open_slot>();
+  Client_session cli{this->ipc_logger(), pair.m_cli_app, pair.m_srv_app, [](const Error_code&) {},
+                     [slot](Channel_obj&& new_chan, auto&& /*mdt_reader*/)
+  {
+    slot->m_chan = std::move(new_chan);
+    slot->m_opened.set_value();
+  }};
+  Server_session srv_session;
+  this->connect_ok(&pair, &cli, &srv_session);
+
+  FLOW_LOG_INFO("Destroying the Session_server; its session lives on and must keep working.");
+  pair.m_srv.reset();
+
+  EXPECT_FALSE(srv_session.session_token().is_nil());
+  EXPECT_EQ(srv_session.session_token(), cli.session_token());
+  {
+    Channel_obj chan;
+    Error_code chan_err;
+    ASSERT_TRUE(srv_session.open_channel(&chan, &chan_err));
+    EXPECT_FALSE(chan_err) << "[" << chan_err << "] [" << chan_err.message() << "].";
+    ASSERT_EQ(slot->m_opened.get_future().wait_for(seconds(5)), boost::future_status::ready);
+    slot->m_chan = Channel_obj{}; // Channel ends predecease the session.
+  }
+
+  if constexpr(Pair::S_SHM_TYPE_OR_NONE != schema::ShmType::NONE)
+  {
+    auto* const app_arena = srv_session.app_shm();
+    ASSERT_NE(app_arena, nullptr);
+    { // Scope: handles must be dropped before the sessions are destroyed.
+      const auto obj = app_arena->template construct<int>(4242);
+      ASSERT_TRUE(obj);
+      const auto blob = srv_session.template lend_object<int>(obj);
+      EXPECT_FALSE(blob.empty());
+      const auto borrowed = cli.template borrow_object<int>(blob);
+      ASSERT_TRUE(borrowed);
+      EXPECT_EQ(*borrowed, 4242);
+    }
+  }
+
+  pair.destroy_sessions(&cli, &srv_session);
+  pair.remove_server_persistent_bits();
+} // TYPED_TEST_P(Session_connect_test, Session_outlives_server)
+
 /* The graceful session-end choreography, server side initiating.  See run_graceful_end() doc for the
  * list of what is covered (error-handler firing semantics both sides; the SHM-jemalloc dtor gate vs.
  * the other types' prompt dtor; hosed-session API sentinels). */
@@ -1593,7 +2033,7 @@ TYPED_TEST_P(Session_connect_test, Server_knobs)
   auto& pair = *pair_ptr;
   pair.populate_apps("Knobs");
   pair.remove_server_persistent_bits(false);
-  this->start_server(&pair);
+  this->start_server(&pair, false); // Uncapped: we observe the pool-size default below.
   auto& srv = *pair.m_srv;
 
   EXPECT_EQ(srv.mq_msg_size_limit(), 0u); // 0 = will-choose-default.
@@ -1781,8 +2221,9 @@ REGISTER_TYPED_TEST_SUITE_P(Session_connect_test,
                             No_server, Corrupt_cns, Stale_cns_then_retry, Rejected_identities, Server_self_check,
                             Config_mismatch, Almost_peer, Null_state, Passive_open_rejected, Open_channel_crossing,
                             Open_channel_peer_closes_immediately, Open_channel_peer_closes_immediately_srv_opens,
-                            Accept_abort, Concurrent_accepts, Sync_io_adapter_guards, Graceful_end_srv_initiates,
-                            Graceful_end_cli_initiates, Server_knobs, Shm_accessors);
+                            Accept_abort, Server_destroyed_mid_flight, Concurrent_accepts, Sync_io_adapter_guards,
+                            Mq_msg_size_limit_per_session, Accept_target_reset, Session_outlives_server,
+                            Graceful_end_srv_initiates, Graceful_end_cli_initiates, Server_knobs, Shm_accessors);
 
 } // Anonymous namespace
 

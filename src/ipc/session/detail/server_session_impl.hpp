@@ -2165,7 +2165,7 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
                     // As promised run the setup thing just before sending the success response to opposing client.
 
                     assert(!err_code);
-                    if ((err_code = pre_rsp_setup_func()))
+                    if ((err_code = pre_rsp_setup_func(*(Base::cli_app_ptr()))))
                     {
                       FLOW_LOG_WARNING("Server session [" << *this << "]: Accept-log-in: Log-in request received "
                                        "(claimed client process creds [" << claimed_proc_creds << "], "

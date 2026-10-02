@@ -177,9 +177,9 @@ public:
    * See Server_session_impl, Client_session_impl.  However in Session_base this value may be not-yet-set (empty), or
    * set (and immutable from then on).
    *
-   * This value shall be generated uniquely (within some context) for each new `Server_session` produced by
-   * Session_server; and Client_session_impl shall find that out while logging in (last part of entering PEER
-   * state).
+   * This value shall be generated uniquely -- process-wide, across all `Session_server`s in the process (see
+   * next_cli_namespace()) -- for each new `Server_session` produced by Session_server; and Client_session_impl
+   * shall find that out while logging in (last part of entering PEER state).
    *
    * @return See above.
    */

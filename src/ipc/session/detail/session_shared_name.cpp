@@ -17,28 +17,11 @@
 
 /// @file
 #include "ipc/session/detail/session_shared_name.hpp"
-#include <mutex>
+#include <atomic>
 #include <regex>
 
 namespace ipc::session
 {
-
-namespace
-{
-
-/// File-local helper variable: a regex used by decompose_conventional_shared_name() overload 1 (non-global-scope).
-std::regex non_global_scope_name_regex;
-
-/// File-local helper variable: a regex used by decompose_conventional_shared_name() overload 2 (global-scope).
-std::regex global_scope_name_regex;
-
-/// File-local helper variable: ensures #non_global_scope_name_regex is built thread-safely only once.
-std::once_flag non_global_scope_name_regex_built;
-
-/// File-local helper variable: ensures #global_scope_name_regex is built thread-safely only once.
-std::once_flag global_scope_name_regex_built;
-
-} // namespace (anon)
 
 Shared_name build_conventional_shared_name
               (const Shared_name& resource_type, const Shared_name& srv_app_name,
@@ -111,6 +94,14 @@ Shared_name build_conventional_shared_name_prefix(const Shared_name& resource_ty
   return name;
 } // build_conventional_shared_name_prefix()
 
+Shared_name next_cli_namespace()
+{
+  // The value used in generating the last result; so the next one = this plus 1.  0 initially (never returned).
+  static std::atomic<uint64_t> s_last_cli_namespace{0};
+
+  return Shared_name::ct_from_int(++s_last_cli_namespace);
+}
+
 bool decompose_conventional_shared_name(const Shared_name& name,
                                         Shared_name* resource_type, Shared_name* srv_app_name,
                                         Shared_name* srv_namespace, Shared_name* cli_app_name,
@@ -120,22 +111,23 @@ bool decompose_conventional_shared_name(const Shared_name& name,
   using std::regex_match;
   using std::smatch;
   using std::string;
+  using std::regex;
 
-  /* This is thread-safe local `static`; actual local `static` is supposedly thread-safe in C++1x but with caveats.
-   * So just ensure it.  Why not just make it global `static`?  Answer: it relies on extern `static`s which
-   * may not yet be initialized (static init ordering problem).  Anyway it's nice to keep the regex string local. */
-  std::call_once(non_global_scope_name_regex_built, [&]()
-  {
-    // Compatible with build_conventional_shared_name(1).
-    non_global_scope_name_regex.assign
-      (ostream_op_string(Shared_name::S_SEPARATOR, Shared_name::S_ROOT_MAGIC.str(), Shared_name::S_SEPARATOR,
-                         "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // resource_type
-                         "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // srv_app_name
-                         "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // srv_namespace
-                         "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // cli_app_name
-                         "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // cli_namespace_or_sentinel
-                         "(.*)")); // the_rest
-  });
+  /* Thread-safely build regex first time-through only.
+   *
+   * (We'd be safely-callable pre-main(), if not for ROOT_MAGIC being a static (static init ordering
+   * problem).  Would be nice to get it there but no known use-cases as of this writing.  Still,
+   * Shared_name itself/overall being maximally constexpr would be cool; tough without constexpr-y std::string
+   * which is C++20 (we're C++17 as of this writing).  @todo Revisit all this.) */
+  static regex
+    non_global_scope_name_regex
+      {ostream_op_string(Shared_name::S_SEPARATOR, Shared_name::S_ROOT_MAGIC.str(), Shared_name::S_SEPARATOR,
+       "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // resource_type
+       "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // srv_app_name
+       "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // srv_namespace
+       "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // cli_app_name
+       "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // cli_namespace_or_sentinel
+       "(.*)")}; // the_rest
 
   smatch matches;
   if (!regex_match(name.str(), matches, non_global_scope_name_regex))
@@ -188,20 +180,18 @@ bool decompose_conventional_shared_name(const Shared_name& name,
   using std::regex_match;
   using std::smatch;
   using std::string;
+  using std::regex;
 
   // Analogous to the other overload, just simpler (fewer fields to decompose-to).  Keeping comments light.
 
-  std::call_once(global_scope_name_regex_built, [&]()
-  {
-    // Compatible with build_conventional_shared_name(2).
-    global_scope_name_regex.assign
-      (ostream_op_string(Shared_name::S_SEPARATOR, Shared_name::S_ROOT_MAGIC.str(), Shared_name::S_SEPARATOR,
+  static regex // Compatible with build_conventional_shared_name(2).
+    global_scope_name_regex
+      {ostream_op_string(Shared_name::S_SEPARATOR, Shared_name::S_ROOT_MAGIC.str(), Shared_name::S_SEPARATOR,
                          "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // resource_type
                          "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // srv_app_name
                          "([^", Shared_name::S_SEPARATOR, "]+)", Shared_name::S_SEPARATOR, // srv_namespace_or_sentinel
                          Shared_name::S_SENTINEL.str(), Shared_name::S_SEPARATOR,
-                         "(.*)")); // the_rest
-  });
+                         "(.*)")}; // the_rest
 
   smatch matches;
   if (!regex_match(name.str(), matches, global_scope_name_regex))

@@ -20,6 +20,7 @@
 
 #include "ipc/session/detail/session_fwd.hpp"
 #include "ipc/session/detail/server_session_dtl.hpp"
+#include "ipc/session/detail/session_shared_name.hpp"
 #include "ipc/session/error.hpp"
 #include "ipc/session/app.hpp"
 #include "ipc/transport/native_socket_stream_acceptor.hpp"
@@ -412,9 +413,6 @@ private:
      * then #m_incomplete_sessions (threads Ws); #m_incomplete_session_graveyard and #m_mutex et al earliest-declared
      * (destroyed last). */
 
-    /// The ID used in generating the last Server_session::cli_namespace(); so the next one = this plus 1.  0 initially.
-    std::atomic<uint64_t> m_last_cli_namespace;
-
     /**
      * Protects `m_incomplete_sessions`, `m_stopping`, `m_n_handlers_active`.  See class doc header impl section for
      * discussion of thread design.
@@ -578,7 +576,6 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
   if (!our_err_code)
   {
     // Finish setting up m_state.  See State members in order and deal with the ones needing explicit init.
-    m_state->m_last_cli_namespace = 0;
     m_state->m_incomplete_session_graveyard
       = boost::movelib::make_unique<flow::async::Single_thread_task_loop>
           (get_logger(),
@@ -598,10 +595,11 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
      *
      * We simply delete everything with the Shared_name prefix used when setting up the MQs
      * (see Server_session_impl::make_channel_mqs()).  The prefix is everything up-to (not including) the PID
-     * (empty_session_base->srv_namespace() below).  Our own .srv_namespace() is
-     * just about to be determined and is unique across time by definition (internally, it's -- again -- our PID);
-     * so any existing MQs are by definition old.  Note that as of this writing there is at most *one* active
-     * process (instance) of a given Server_app.
+     * (empty_session_base->srv_namespace() below).  Any MQ found under it is old: per the documented lifetime
+     * requirements (Session_server doc header), no `Session` or channel from an earlier Session_server for this
+     * Server_app may still exist when we are constructed -- in any process, this one included (a Session_server
+     * following another in the same process has the same .srv_namespace(), our PID).  So we remove them all,
+     * regardless of any liveness consideration.
      *
      * Subtlety (kind of): We worry about such cleanup only if some type of MQ is in fact enabled at compile-time
      * of *this* application; and we only clean up that MQ type, not the other(s) (as of this writing there are 2,
@@ -965,7 +963,6 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
   using util::String_view;
   using flow::async::Task_asio_err;
   using boost::make_shared;
-  using std::to_string;
   using std::string;
 
   assert(target_session);
@@ -1079,34 +1076,21 @@ void CLASS_SESSION_SERVER_IMPL::async_accept(Server_session_obj* target_session,
       return (cli_it == m_cli_app_master_set_ref.end()) ? nullptr : &cli_it->second;
     };
 
-    /* And this one is required to issue a unique cli-namespace, if all goes well.  The "if all goes well" part
-     * is why it's a hook and not just pre-computed and passed-into async_accept_log_in() as an arg. */
-    auto cli_namespace_func = [this]() -> Shared_name
-    {
-      return Shared_name::ct(to_string(++m_state->m_last_cli_namespace));
-    };
+    /* And this one is required to issue a unique (<-attn) cli-namespace, if all goes well.  The "if all goes well" part
+     * is why it's a hook and not just pre-computed and passed-into async_accept_log_in() as an arg.  ("Unique" means
+     * process-wide, not merely within *this; see next_cli_namespace() doc header for brief discussion/rationale.
+     * It's actually relevant to understanding the lifetimes of servers/server-sessions, so do have a look.) */
+    auto cli_namespace_func = []() -> Shared_name { return next_cli_namespace(); };
 
-    /* Lastly, we are to execute this upon knowing the Client_app and before the log-in response it sent to
-     * opposing Client_session. */
-    auto pre_rsp_setup_func = [this,
-                               incomplete_session_observer = Incomplete_session_observer{incomplete_session}]
-                                () -> Error_code
+    /* Lastly, we are to execute this upon knowing the Client_app and before the log-in response is sent to
+     * opposing Client_session.  (The session tells us the Client_app; we must not learn it by reaching into the
+     * Server_session_obj from thread Ws: dtor_stop_accepting() may be emptying that object in thread U just then,
+     * and the emptying nulls its impl pointer before joining thread Ws.) */
+    auto pre_rsp_setup_func = [this](const Client_app& cli_app) -> Error_code
     {
       // We are in thread Ws (unspecified; really Server_session worker thread).
-
-      // (Could have captured incomplete_session itself, but I'd rather assert() than leak.)
-      auto incomplete_session = incomplete_session_observer.lock();
-      assert(incomplete_session
-             && "The Server_session_obj cannot be dead (dtor ran), if it's invoking its async handlers OK "
-                  "(and thus calling us in its async_accept_log_in() success path.");
-      // If it's not dead, we're not dead either (as us dying is the only reason incomplete_session would die).
-
-      const auto cli_app_ptr = Server_session_dtl<Server_session_obj>{ *incomplete_session }.base().cli_app_ptr();
-      assert(cli_app_ptr && "async_accept_log_in() contract is to call pre_rsp_setup_func() once all "
-                              "the basic elements of Session_base are known (including Client_app&).");
-
-      return m_per_app_setup_func(*cli_app_ptr);
-    }; // auto pre_rsp_setup_func =
+      return m_per_app_setup_func(cli_app);
+    };
 
     /* @todo It occurs to me (ygoldfel) now that I look at it: all these args -- even on_done_func --
      * could instead be passed into Server_session_obj ctor; that guy could save them into m_* (as of this writing
