@@ -1608,11 +1608,23 @@ TYPED_TEST_P(Session_connect_test, Server_destroyed_mid_flight)
  * Asserted per round: each request is answered with the expected value; A's server-side error handler fires exactly
  * once; A's client-side dtor completes; B's connect and accept both succeed, the two B sides agree on the session
  * token; and, for the SHM types, B's app-scope arena (the app being the same as A's) is usable: an object constructed
- * in it round-trips via lend/borrow.  Beyond these, the detectors are crashes, asserts, and the ASAN/TSAN cells. */
+ * in it round-trips via lend/borrow.  Beyond these, the detectors are crashes, asserts, and the ASAN/TSAN cells.
+ *
+ * Under TSAN the SHM-classic variant is skipped.  There, objects in a pool are shared-owned by the two sides, each of
+ * which maps the pool at its own address; so a chunk freed via one side's mapping (and its address of the in-SHM
+ * allocator mutex) and then allocated anew via the other's looks, to TSAN, like a race.  These false positives are
+ * reliable once struc::Channel traffic flows over SHM-classic (transport_test's SHM-classic TSAN suppressions
+ * concern the same phenomenon).  The other two variants run under TSAN as normal. */
 TYPED_TEST_P(Session_connect_test, Session_end_during_connect)
 {
   FLOW_LOG_SET_CONTEXT(this->get_logger(), Log_component::S_TEST);
   using Pair = typename TestFixture::Pair;
+
+  if constexpr(flow::test::tsan_enabled() && (Pair::S_SHM_TYPE_OR_NONE == schema::ShmType::CLASSIC))
+  {
+    GTEST_SKIP() << "Skipped under ThreadSanitizer for SHM-classic: cross-mapping SHM false positives; see the test's "
+                    "doc comment.";
+  }
   using Client_session = typename TestFixture::Client_session;
   using Server_session = typename TestFixture::Server_session;
   using Channel_obj = typename TestFixture::Channel_obj;
