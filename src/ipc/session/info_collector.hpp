@@ -50,7 +50,7 @@ namespace ipc::session
  * and printing via `ostream << print(...)`.
  *
  * W/r/t the latter operation -- printing -- it is also possible to print all the `*_stats()` in one shot:
- * simply use `os << *this`.  You may use the simple in knobs (public, mutable) #m_fmt to affect the format of
+ * simply use `os << *this`.  You may use the simple knobs in (public, mutable) #m_fmt to affect the format of
  * the print-op (e.g.: multi-line versus single-line).
  *
  * @note Slight subtlety: A `*this` is a live-accessor of information, not a store (dump) of information.
