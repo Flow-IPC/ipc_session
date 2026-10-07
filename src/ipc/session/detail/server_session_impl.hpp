@@ -573,8 +573,8 @@ private:
   /**
    * In thread W acquires the needed shared resources (MQs and/or `Native_handle` pair as of this writing) and creates
    * local #Channel_obj to emit to the user thus completing the channel-open on this side.  If active-open on our part,
-   * we do this immediately in mdt_builder() -- before open_channel() even -- but before the
-   * #Channel_obj can be emitted to the user (1) open_channel() must actually be called (obv) and (2) client
+   * we do this immediately in mdt_builder() -- before open_channel() even -- but before
+   * the #Channel_obj can be emitted to the user (1) open_channel() must actually be called (obv) and (2) client
    * must respond OK to our open-channel-to-client request out-message.  If passive-open, we do this upon receiving
    * client's open-channel-to-server request, before replying with our OK.  Either way we are the ones acquiring the
    * resources, then we send names/refs to those resources to client.
@@ -1669,11 +1669,11 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
   assert(mq_name_s2c_or_none.empty());
 
   Native_socket_stream local_sock_stm_or_null;
-  Error_code sys_err_code;
+  Error_code err_code;
   const auto nickname = active_else_passive ? ostream_op_string("active", ++m_last_actively_opened_channel_id)
                                             : ostream_op_string("passive", ++m_last_passively_opened_channel_id);
 
-  /* Returns false => won't leak anything generated therein; remote_hndl_or_null will be .null(); sys_err_code
+  /* Returns false => won't leak anything generated therein; remote_hndl_or_null will be .null(); err_code
    * will be set. */
   [[maybe_unused]] const auto make_sock_stm_func = [&]()
   {
@@ -1681,6 +1681,7 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
 
     Peer_socket local_hndl_asio{*m_async_worker.task_engine()};
     Peer_socket remote_hndl_asio{std::move(local_hndl_asio)};
+    Error_code sys_err_code; // (Named thus for FLOW_ERROR_SYS_ERROR_LOG_WARNING().)
     connect_pair(local_hndl_asio, remote_hndl_asio, sys_err_code);
     if (sys_err_code)
     {
@@ -1688,6 +1689,7 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
                        "connect_pair() failed.  Not fatal to the session; will inform the opposing peer (client) "
                        "(if passive-open) or caller (if active-open).  Details follow.");
       FLOW_ERROR_SYS_ERROR_LOG_WARNING(); // Log based on sys_err_code.
+      err_code = sys_err_code;
       return false;
     }
     // else
@@ -1700,13 +1702,23 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
     local_sock_stm_or_null = Native_socket_stream{get_logger(), nickname, std::move(local_hndl)};
 
     // Please see Native_socket_stream::remote_peer_process_credentials() doc header for explanation of this.
+    const auto& creds = m_master_channel->owned_channel()->remote_peer_process_credentials(&err_code);
+    if (err_code)
     {
-      Error_code err_code;
-      local_sock_stm_or_null.remote_peer_process_credentials(m_master_channel->owned_channel()
-                                                               ->remote_peer_process_credentials(&err_code));
-      assert((!err_code) && "By contract that should only fail if the socket got hosed via transmission; but "
-                            "it is a local socket we just established; so there is no way.");
+      /* The *session master channel's* socket stream got hosed (by an error, e.g., the opposing process died)
+       * before we got here; so it no longer hands out the opposing-process creds.  The session is going down;
+       * its master-channel error handler shall report that.  Just fail this open-channel attempt (honoring our
+       * returns-false contract: don't leak the handles; remote_hndl_or_null .null(); err_code set). */
+      FLOW_LOG_WARNING("Server session [" << *this << "]: Open-channel (active? = [" << active_else_passive << "]): "
+                       "Could not obtain opposing-process creds from session master channel, whose transport "
+                       "must have just been hosed: [" << err_code << "] [" << err_code.message() << "].  "
+                       "Failing this open-channel attempt; the session-hosing shall be reported separately.");
+      local_sock_stm_or_null = {};
+      remote_hndl_or_null.close();
+      return false;
     }
+    // else
+    local_sock_stm_or_null.remote_peer_process_credentials(creds);
 
     return true;
   }; // make_sock_stm_func =
@@ -1716,13 +1728,13 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
     Persistent_mq_handle_from_cfg mq_c2s;
     Persistent_mq_handle_from_cfg mq_s2c;
 
-    if (!make_channel_mqs(&mq_c2s, &mq_s2c, &mq_name_c2s_or_none, &mq_name_s2c_or_none, &sys_err_code))
+    if (!make_channel_mqs(&mq_c2s, &mq_s2c, &mq_name_c2s_or_none, &mq_name_s2c_or_none, &err_code))
     {
       return false;
     }
     // else
 
-    assert((!sys_err_code) && "It should have returned false on truthy Error_code.");
+    assert((!err_code) && "It should have returned false on truthy Error_code.");
     if constexpr(S_SOCKET_STREAM_ENABLED)
     {
       static_assert(std::is_same_v<Channel_obj,
@@ -1730,11 +1742,11 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
       if (make_sock_stm_func())
       {
         opened_channel = Channel_obj{get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s),
-                                     std::move(local_sock_stm_or_null), &sys_err_code};
+                                     std::move(local_sock_stm_or_null), &err_code};
       }
       else
       {
-        assert(sys_err_code); // Handled a bit lower down.
+        assert(err_code); // Handled a bit lower down.
       }
       // Fall through.
     }
@@ -1742,10 +1754,10 @@ bool CLASS_SRV_SESSION_IMPL::create_channel_and_resources(Shared_name* mq_name_c
     {
       static_assert(std::is_same_v<Channel_obj,
                                    Mqs_channel<true, Persistent_mq_handle_from_cfg>>, "Sanity check.");
-      opened_channel = Channel_obj{get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s), &sys_err_code};
+      opened_channel = Channel_obj{get_logger(), nickname, std::move(mq_s2c), std::move(mq_c2s), &err_code};
     }
 
-    if (sys_err_code)
+    if (err_code)
     {
       // Clean up the stuff that *was* created OK.  Use tactic from inside error path in make_channel_mqs().
       mq_c2s = {};
