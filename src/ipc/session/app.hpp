@@ -278,7 +278,7 @@ struct Server_app : public App
    *     prematurely.  This depends on the inner workings of the particular SHM system chosen;
    *     shm::classic::Client_session opens pools during session-open procedure exclusively, but other
    *     systems may behave differently.)
-   *     - Arena-lending SHM providers -- as of this writing namely ipc::shm::arena_lend::jemalloc -- involve
+   *     - Arena-lending SHM-providers -- as of this writing namely ipc::shm::arena_lend::jemalloc -- involve
    *       both sides (session-server and session-client) each creating SHM pool(s) for allocations from
    *       within their respective processes.  #m_permissions_level_for_client_apps applies to the
    *       server-created pools, yes; but also client-created pools.  At the moment it seems to me

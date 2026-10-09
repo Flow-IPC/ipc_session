@@ -22,9 +22,9 @@
 
 /**
  * Namespace containing the ipc::session module's extension of boost.system error conventions, so that that API
- * can return codes/messages from within its own new set of error codes/messages.  Historically this was written
- * after ipc::transport::error, and essentially all the notes in that doc header and otherwise within that
- * namespace apply equally here.  Therefore please:
+ * can return codes/messages from within its own new set of error codes/messages.  It follows the pattern
+ * of ipc::transport::error; essentially all the notes in that doc header and otherwise within that namespace apply
+ * equally here.  Therefore please:
  *
  * @see ipc::transport::error documentation; notes therein (such as to-dos) likely apply here equally.
  */
@@ -38,7 +38,7 @@ constexpr int S_CODE_LOWEST_INT_VALUE = 1;
 
 /**
  * All possible errors returned (via `Error_code` arguments) by ipc::session functions/methods *outside of*
- * ipc::transport-triggered errors involved in transport involved in doing session-related work; and possibly
+ * ipc::transport-triggered errors encountered in the course of session-related work; and possibly
  * system-triggered errors.
  *
  * All notes from transport::error::Code doc header apply here.
@@ -174,8 +174,8 @@ namespace boost::system
 /**
  * Ummm -- it specializes this `struct` to -- look -- the end result is boost.system uses this as
  * authorization to make `enum` `Code` convertible to `Error_code`.  The non-specialized
- * version of this sets `value` to `false`, so that random arbitary `enum`s can't just be used as
- * `Error_code`s.  Note that this is the offical way to accomplish that, as (confusingly but
+ * version of this sets `value` to `false`, so that random arbitrary `enum`s can't just be used as
+ * `Error_code`s.  Note that this is the official way to accomplish that, as (confusingly but
  * formally) documented in boost.system docs.
  */
 template<>

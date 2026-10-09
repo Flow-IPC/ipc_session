@@ -59,10 +59,10 @@ enum ShmType
   # Sentinel value/no SHM type specified.
 
   classic @1;
-  # SHM provider: ipc::shm::classic::Pool_arena.
+  # SHM-provider: ipc::shm::classic::Pool_arena.
 
   jemalloc @2;
-  # SHM provider: ipc::shm::arena_lend::jemalloc.
+  # SHM-provider: ipc::shm::arena_lend::jemalloc.
 
   endSentinel @3;
 }

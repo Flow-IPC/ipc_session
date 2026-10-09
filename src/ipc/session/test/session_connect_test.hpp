@@ -120,6 +120,7 @@
 #include "ipc/session/sync_io/session_server_adapter.hpp"
 #include "ipc/shm/arena_lend/arena_lend_fwd.hpp"
 #include "ipc/test/test_logger.hpp"
+#include "ipc/test/test_shm_util.hpp"
 #include <flow/test/test_common_util.hpp>
 #include <gtest/gtest.h>
 #include <atomic>
@@ -2455,6 +2456,15 @@ TYPED_TEST_P(Session_connect_test, Shm_accessors)
     if constexpr(Pair::S_SHM_TYPE_OR_NONE == schema::ShmType::CLASSIC)
     {
       ASSERT_NE(cli.app_shm(), nullptr); // (Distinct handle object from the server-side ones; same pool.)
+
+      /* The session's SHM-pools are sparse: having opened the session, each has committed (taken RAM for) only a
+       * little of its size.  (Guards against regressing to committing entire pools at creation -- as happened with
+       * Boost >= 1.76 -- which is costly in RAM and in session-opening time.) */
+      for (const auto* const arena : { srv_arena, srv_app_arena })
+      {
+        EXPECT_LT(ipc::test::shm_pool_committed_sz(arena->m_pool_name), arena->arena_size() / 4)
+          << "SHM-pool [" << arena->m_pool_name << "] should be sparse.";
+      }
 
       FLOW_LOG_INFO("SHM-classic: lend/borrow round-trips via the Session-level wrappers, both scopes.");
       { // Scope: borrowed/constructed handles must be dropped before the sessions are destroyed.
