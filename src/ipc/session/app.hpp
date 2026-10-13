@@ -88,7 +88,27 @@ struct App
 {
   // Types.
 
-  /// Suggested type for storing master repository of all `App`s.  See App doc header for discussion.
+  /**
+   * Type for storing master repository of all `App`s.  See App doc header for discussion.
+   *
+   * @internal
+   *
+   * ### Rationale: Chosen type (also applies to Client_app::Master_set and Server_app::Master_set) ###
+   * It is `unordered_`, simply because there was not any particularly compelling reason to impose an order.
+   * (Admittedly: alphabetical order by `m_name` might have been nice in some contexts, like if someone wanted
+   * to pretty-print a `Master_set`.  Ah, well.  It is set now.  Prints can be tweaked to sort anyway; as of
+   * this writing Flow-IPC does not print a `Master_set` anywhere.)
+   *
+   * Using `unordered_map` (instead of `unordered_flat_map`) is pretty good here, as this way there is
+   * pointer stability.  On one hand the implied -- not as of this writing formally required -- preferred pattern
+   * of use is for the user to set up their IPC universe, including these `Master_set`s, before any IPC happens --
+   * and then never change any of the data therein.  On the other hand, "implied preferred pattern" be damned,
+   * it is conceivable a user would at some point, after giving some API a `Master_set`, add an App to that set.
+   * In that case pointer stability is an asset; any memorized `App` addresses won't become invalid on rehash.
+   *
+   * Performance is not a concern here: lookups are rare; sizes are small.  Hence no need to mess
+   * with `_node_map` and so forth.
+   */
   using Master_set = boost::unordered_map<std::string, App>;
 
   // Data.
@@ -203,7 +223,7 @@ struct Client_app : public App
   /// Short-hand for base type.
   using Base = App;
 
-  /// Suggested type for storing master repository of all `Client_app`s.  See App doc header for discussion.
+  /// Type for storing master repository of all `Client_app`s.  See App doc header for discussion.
   using Master_set = boost::unordered_map<std::string, Client_app>;
 };
 
@@ -221,7 +241,7 @@ struct Server_app : public App
 {
   // Types.
 
-  /// Suggested type for storing master repository of all `Server_app`s.  See App doc header for discussion.
+  /// Type for storing master repository of all `Server_app`s.  See App doc header for discussion.
   using Master_set = boost::unordered_map<std::string, Server_app>;
 
   /// Short-hand for existence-checkable set of `Client_app`s via App::m_name.
