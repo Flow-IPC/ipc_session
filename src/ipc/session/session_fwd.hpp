@@ -307,6 +307,8 @@ struct App;
 struct Server_app;
 struct Client_app;
 
+class Session_cfg;
+
 template<typename Master_structured_channel_t>
 class Info_collector;
 

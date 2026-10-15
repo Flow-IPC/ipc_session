@@ -21,6 +21,7 @@
 #include "ipc/session/detail/info_collector_dtl.hpp"
 #include "ipc/session/detail/session_base.hpp"
 #include "ipc/session/error.hpp"
+#include "ipc/session/session_cfg.hpp"
 #include "ipc/transport/protocol_negotiator.hpp"
 #include "ipc/transport/native_socket_stream_cfg.hpp"
 #include "ipc/util/process_credentials.hpp"
@@ -2019,8 +2020,8 @@ void CLASS_SRV_SESSION_IMPL::async_accept_log_in
      * mechanism (in both directions) to detect unspecified zombie/death situations of the unstructured transport
      * layer.  E.g., if the other side is too dead to send pings or anything else, we will know and hopefully
      * shut the session down before things go really bad. */
-    m_master_channel->owned_channel_mutable()->auto_ping();
-    m_master_channel->owned_channel_mutable()->idle_timer_run();
+    m_master_channel->owned_channel_mutable()->auto_ping(Session_cfg::S_PING_PERIOD);
+    m_master_channel->owned_channel_mutable()->idle_timer_run(Session_cfg::S_IDLE_TIMEOUT);
 
     m_master_channel->start([this](const Error_code& channel_err_code)
     {

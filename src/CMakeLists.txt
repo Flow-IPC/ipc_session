@@ -64,6 +64,7 @@ set(HDRS
     ipc/session/error.hpp
     ipc/session/server_session.hpp
     ipc/session/session.hpp
+    ipc/session/session_cfg.hpp
     ipc/session/session_fwd.hpp
     ipc/session/session_server.hpp
     ipc/session/info_collector.hpp

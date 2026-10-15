@@ -21,6 +21,7 @@
 #include "ipc/session/detail/info_collector_dtl.hpp"
 #include "ipc/session/detail/session_base.hpp"
 #include "ipc/session/error.hpp"
+#include "ipc/session/session_cfg.hpp"
 #include "ipc/transport/native_socket_stream_cfg.hpp"
 #include "ipc/transport/error.hpp"
 #include "ipc/transport/protocol_negotiator.hpp"
@@ -1535,8 +1536,8 @@ bool CLASS_CLI_SESSION_IMPL::async_connect(const Mdt_builder_ptr& mdt,
 
           /* Also enable liveness checking and keep-alive; the other side will do the same.
            * Read comment in Server_session_impl in similar spot; the same applies symmetrically here. */
-          m_master_channel->owned_channel_mutable()->auto_ping();
-          m_master_channel->owned_channel_mutable()->idle_timer_run();
+          m_master_channel->owned_channel_mutable()->auto_ping(Session_cfg::S_PING_PERIOD);
+          m_master_channel->owned_channel_mutable()->idle_timer_run(Session_cfg::S_IDLE_TIMEOUT);
 
           m_master_channel->start([this, master_channel_observer = Master_structured_channel_observer{m_master_channel}]
                                     (const Error_code& channel_err_code) mutable

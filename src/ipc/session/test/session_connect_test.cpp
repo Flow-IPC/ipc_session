@@ -175,7 +175,7 @@ public:
 TYPED_TEST_SUITE(Session_channel_matrix_test, Matrix_pair_types, Matrix_type_names);
 
 /* For this instantiation's config: session up; 4 channels established (init-channel x the 2 request
- * flavors; active open_channel() x the 2 directions, passive-accepted by the opposing side -- the
+ * types; active open_channel() x the 2 directions, passive-accepted by the opposing side -- the
  * passive-open-capable handler wiring being a first for this file); each channel's pipe(s) basically
  * work, in both directions.  See the section comment above. */
 TYPED_TEST(Session_channel_matrix_test, Establish_and_basic_use)
@@ -246,7 +246,7 @@ TYPED_TEST(Session_channel_matrix_test, Establish_and_basic_use)
     srv_passive_slot->m_opened.set_value();
   });
 
-  // The init channels, both flavors, present on both sides.
+  // The init channels, both types, present on both sides.
   ASSERT_EQ(cli_init_chans_by_cli_req.size(), 1u);
   ASSERT_EQ(srv_init_chans_by_cli_req.size(), 1u);
   ASSERT_EQ(cli_init_chans_by_srv_req.size(), 1u);
