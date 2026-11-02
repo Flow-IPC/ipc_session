@@ -21,6 +21,8 @@
 #include "ipc/session/error.hpp"
 #include "ipc/util/native_handle.hpp"
 #include <flow/error/error.hpp>
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 namespace ipc::session
@@ -34,7 +36,6 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
   using util::Native_handle;
   using boost::system::system_category;
   using ::open;
-  using ::close;
   // using ::O_PATH; // It's a macro apparently.
   // using ::errno; // It's a macro apparently.
 
@@ -78,7 +79,7 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
                      "unexpected ownership; see preceding WARNING referencing all other details.");
   }
 
-  close(native_handle);
+  handle.close();
 } // ensure_resource_owner_is_app(1)
 
 void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_handle handle, const App& app,

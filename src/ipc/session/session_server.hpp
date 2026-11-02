@@ -127,6 +127,8 @@ namespace ipc::session
  *         agreed-upon on both sides.)
  *       - Client_session::sync_connect() shall check this file immediately to know to which server process --
  *         Session_server -- to connect.
+ *   - All processes in the IPC universe must share one PID namespace (relevant when using containers).
+ *     See guided Manual page @ref safety_perms (section @ref pid_namespace).
  *
  * As of this writing we expect Session_server to be in charge of maintaining the process's only
  * PID file, in the sense that a typical daemon is expected to maintain a general-use PID file, with the usual

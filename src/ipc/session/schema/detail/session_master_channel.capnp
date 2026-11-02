@@ -38,14 +38,14 @@ $Cxx.namespace("ipc::session::schema::detail");
 # Background: A *session* is the totality of IPC work between a given application A' instance (process) A and
 # application B' instance (process) B.  That is, A (called client) connects to B (server), usually around startup, when
 # it wants to begin IPC with B'; this establishes the session.  (It ends when either A or B dies or otherwise
-# becomes inactive/unresponsive.)  While the session is active, each of A may establish 0+ *channels* with B;
+# becomes inactive/unresponsive.)  While the session is active, A may establish 0+ *channels* with B;
 # and symmetrically vice versa.  Each channel, once established, is a full-duplex communication pipe for exchanging
 # structured messages -- *structured* as enabled by capnp schemas like this one -- and some other stuff (at least
 # native sockets a/k/a FDs).  These channels deal in payloads defined by schemas written by A', B' application coders
 # (Flow-IPC library users).  However in order for these channels to be established successfully in the first place,
 # a *session master channel* is required to be established by internal ipc::session code.  Its tasks at least
 # comprise:
-#   - Message exachange for the initial "login" of A to B: while the low-level channel connection establishes the
+#   - Message exchange for the initial "login" of A to B: while the low-level channel connection establishes the
 #     raw channel, certain security and safety-related matters have to be initially exchanged.  Once completed:
 #     - If A wants to open a channel to B, or B to A, a channel-opening message exchange must occur.  So perhaps
 #       the session master channel is the chicken... while the user channels are the subsequently resulting eggs.
@@ -63,13 +63,13 @@ using Metadata = Common.Metadata;
 using Size = Common.Size;
 using MqType = SessionCommon.MqType;
 using ShmType = SessionCommon.ShmType;
-using ProtoVer = Int16; # Isomorphic to `Protocol_version::proto_ver_t`.  See discussion in its doc header.
+using ProtoVer = Int16; # Isomorphic to `Protocol_negotiator::proto_ver_t`.  See discussion in its doc header.
 
 using ClientNamespace = Text;
 # String identifying, uniquely within a given half-session (i.e., IPC-active server-app instance (process)),
 # a particular session (i.e., connecting client-app instance (process)).
 #   - Used, at least, within `Shared_name`s to segregate all `Shared_name`s pertaining to a given session.
-#     So, conceptually, each in-session shared resources will have a name like
+#     So, conceptually, each in-session shared resource will have a name like
 #     "/.../<half-session-namespace>/.../<ClientNamespace>".
 #   - As of this writing it is actually a decimal encoding of an integer 1, 2, ..., assigned in order that
 #     new sessions arise within a given half-session.  (In fact see LogInRsp.)
@@ -156,15 +156,9 @@ struct LogInReq(MetadataPayload)
   # supported by all server versions that could possibly speak to it (in LogInReq specifically).  After LogInRsp
   # is received and verified, the client can zero in on the exact version to speak (or explode the channel/session).
   #
-  # Update: We now are up to version 2; however with this up-versioning we've decided to not retain
-  # backwards compatibility to version 1.  Hence the notes above continue to apply but only in the
-  # future and only potentially.
-  #
-  # Version 1->2 changes:
-  #   - We removed claimedOwnProcessCredentials, as this information is now exchanged for all
-  #     channels via ChannelHeader.claimedOwnProcessCredentials (hence before our log-in phase).
-  #     As of this writing, though, the *verification* thereof (versus OS-reported values on a per-session basis) does
-  #     still occur during log-in.
+  # Update: We now are beyond version 1; however with the up-versioning(s) so far we've decided to not retain
+  # backwards compatibility to preceding versions.  Hence the notes above continue to apply, still only in the
+  # future and still only potentially.
 
   mqTypeOrNone @1 :MqType;
   # Verified knob: Is an MQ pipe enabled (if not then `none`); if so its type (`posix`, `bipc`, whatever).
@@ -213,21 +207,21 @@ struct LogInReq(MetadataPayload)
 
 struct LogInRsp(MetadataPayload)
 {
-  # Response to LogInReq.  If received then log-in successful.  If channel closed instead the unsuccessful.
+  # Response to LogInReq.  If received then log-in successful.  If channel closed instead then unsuccessful.
   # TODO: Consider adding failed LogInRsp variant with reason code a-la OpenChannelResult.
 
   protocolNegotiationToClient @0 :ProtocolNegotiation;
   # Identical stuff to LogInReq.protocolNegotiationToServer -- see that guy.
   # So assuming server is happy and sends LogInRsp, client performs identical check on these data.
-  # If it's not happy (even though server was, hence why it even responses with LogInRsp), *it* closes session.
+  # If it's not happy (even though server was, hence why it even responds with LogInRsp), *it* closes session.
 
   clientNamespace @1 :ClientNamespace;
 
   metadata @2 :Metadata(MetadataPayload);
-  # See LogInRsp.  Symmetrical thing but srv->cli.
+  # See LogInReq.metadata.  Symmetrical thing but srv->cli.
 
   numInitChannelsBySrvReq @3 :Size;
-  # See LogInRsp.  Symmetrical to numInitChannelsByCliReq but srv->cli.
+  # See LogInReq.numInitChannelsByCliReq.  Symmetrical to numInitChannelsByCliReq but srv->cli.
   # Returned on each side as init_channels_by_srv_req.
 }
 
@@ -311,7 +305,7 @@ struct OpenChannelToClientRsp
 struct OpenChannelToServerReq(MetadataPayload)
 {
   # Client->server notification of opening a bidirectional channel.  (See also OpenChannelToClientReq for the
-  # alternative server->client flow.)  OpenChannelToServerRsp reponse is required to complete the channel opening.
+  # alternative server->client flow.)  OpenChannelToServerRsp response is required to complete the channel opening.
   #
   # Keeping comments light, in that most comments for OpenChannelToClientReq apply here.
   # However, this is more of a 2-hop exchange, because in our design the server side is still the one expected to create
@@ -346,7 +340,7 @@ struct GracefulSessionEnd
   # is needed, and used, only by SHM-jemalloc (shmTypeOrNone = jemalloc) sessions; and the "user resources that
   # must be freed before the session can fully close" are handles (cross-process shared_ptr<>s) from
   # session.session_shm()->construct<>()ed (where `session` is side B `Session` object) that have been
-  # .borrow_object()ed by side A.  So side A sending this to side B is saying, "they're calling out dtor, so
+  # .borrow_object()ed by side A.  So side A sending this to side B is saying, "they're calling their dtor, so
   # they have to have freed any stuff they've borrowed from you, so you can now destroy your Session object including
   # this SHM arena."  But do see aforementioned doc header which explores it more methodically.
 

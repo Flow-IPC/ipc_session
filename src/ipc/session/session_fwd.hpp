@@ -31,6 +31,9 @@
  * SHared Memory (SHM).  See namespace ::ipc doc header for an overview of Flow-IPC modules
  * including how ipc::session relates to the others.  Then return here.  A synopsis follows:
  *
+ * @see The guided Manual chapters, starting at @ref session_setup, cover these topics; see also @ref chan_open,
+ *      @ref session_app_org, @ref safety_perms, and @ref universes.
+ *
  * It is possible to use the structured layer of ipc::transport, namely the big daddy transport::struc::Channel,
  * without any help from ipc::session.  (It's also possible to establish unstructured transport::Channel and
  * the various lower-level IPC pipes it might comprise.)  And, indeed,

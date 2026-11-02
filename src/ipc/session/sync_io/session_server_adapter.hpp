@@ -40,10 +40,10 @@ namespace ipc::session::sync_io
  * @see util::sync_io doc header -- describes the general `sync_io` pattern we are following.
  * @see session::Session_server, shm::classic::Session_server, shm::arena_lend::jemalloc::Session_server.
  *
- * As is generally the case when choosing `sync_io::X` versus `X`, we recommend using `X` due to it being easier.
- * In this particular case (see below) there is no perf benefit to using `sync_io::X`, either, so the only reason
- * to use `sync_io::X` in this case would be because you've got an old-school reactor event loop with
- * a `poll()` or `epoll_wait()`, in which case the `sync_io` API may be easier to integrate.
+ * In this particular case (see below) `sync_io::X` is internally built on `X`, so it does not avoid background
+ * threads and offers no perf benefit.  So the reason to use `sync_io::X` here would be that you've got an
+ * old-school reactor event loop with a `poll()` or `epoll_wait()`, in which case the `sync_io` API may be easier
+ * to integrate.  Otherwise `X` does the same job with a smaller API.
  *
  * To use it:
  *   - Construct it explicitly.  The ctor signature is exactly identical to that of session::Session_server.
