@@ -144,7 +144,7 @@ namespace ipc::session
  * structured in-message the user would see) chunk of capnp-structured *metadata*.  This is transmitted
  * and supplied to the on-passive-open handler per the preceding doc section.  Details:
  *
- * It is encoded in a capnp-`struct` `Metadata`, defined in common.capnp.  However that `struct`
+ * It is encoded in a capnp-`struct` `Metadata`, defined in `common.capnp`.  However that `struct`
  * is generically parameterized on another capnp-type of the user's choice.  That is the Session template arg
  * #Mdt_payload_obj.  Hence the user shall decide how to encode the channel-differentiating info on a
  * per-Session basis.  capnp shall generate the usual `Reader` and `Builder` nested classes; the latter to

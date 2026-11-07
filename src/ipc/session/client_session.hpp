@@ -256,7 +256,7 @@ public:
    *     application.
    *   - The location of this file is determined by Server_app contents.  Namely, Server_app::m_name, at least,
    *     is unique per Server_app in the universe, and most of the PID file's name comprises it; and
-   *     its location comprises Server_app::m_kernel_persistent_run_dir_override and/or /var/run (or equivalent).
+   *     its location comprises Server_app::m_kernel_persistent_run_dir_override and/or `/var/run` (or equivalent).
    *   - sync_connect() reads the CNS (PID file) at that location, unique among `Server_app`s.  Now it knows
    *     "where" to connect in order to open the session; so it won't accidentally connect to some old zombie
    *     instance of the Server_app (its PID wouldn't be in the CNS file any longer) or another application entirely

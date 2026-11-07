@@ -79,7 +79,7 @@ namespace ipc::session
  *      info about init-channels, wherein the opposing Session_server sends us info about the pre-opened init-channels.
  *      If so, PEER state is reached upon receipt of this; otherwise immediately.
  *
- * See session_master_channel.capnp for the schema for `m_master_channel`.  Reading that gives a nice overview of
+ * See `session_master_channel.capnp` for the schema for `m_master_channel`.  Reading that gives a nice overview of
  * the protocol involved, both in CONNECTING (after the socket is connected) and in PEER.  Also notable is that
  * this setup allows us to immediately "eat our own dog food" by using a `struc::Channel` to enable the opening
  * of any further channels (structured or otherwise).
@@ -148,8 +148,8 @@ namespace ipc::session
  *
  * So we, too, maintain two `Protocol_negotiator`s: the main one and the "aux" one for those two bullet points
  * respectively.  As of this writing there is only version 1 of everything; but if this changes for one of the
- * "aux" `Session` hierarchies -- e.g., SHM-jemalloc's internally used ipc_session_message.capnp channel/schema --
- * then that guy's "aux" protocol-version can be bumped up.  (In the case of ipc_session_message.capnp specifically,
+ * "aux" `Session` hierarchies -- e.g., SHM-jemalloc's internally used `ipc_session_message.capnp` channel/schema --
+ * then that guy's "aux" protocol-version can be bumped up.  (In the case of `ipc_session_message.capnp` specifically,
  * and I say this only for exposition, that code can -- if it wants -- do its own protocol negotiation along its
  * own channel; but by leveraging the "aux" `Protocol_negotiator` version infrastructure, they do not have to.
  * Good for perf and, in this case more importantly, good for keeping code complexity down.)
@@ -157,7 +157,7 @@ namespace ipc::session
  * How we're different: The mechanics of protocol-version exchange are simpler for us, because we have a built-in
  * SYN/SYN-ACK like exchange at the start (log-in-request, log-in-response) via the session master channel.
  * So we piggy-back (piggy-front?) the protocol-negotiation info onto those 2 messages which exist anyway.
- * You can see that now by looking at session_master_channel.capnp and noting how `ProtocolNegotiation` fields
+ * You can see that now by looking at `session_master_channel.capnp` and noting how `ProtocolNegotiation` fields
  * sit up-top in `LogInReq` and `LogInRsp`.  As Protocol_version doc header discussion suggests, it is important
  * to verify the `ProtocolNegotiation` fields before interpreting any other part of the incoming `LogInReq` and
  * `LogInRsp` by server and client respectively (and in that chronological order, as guaranteed by the handshake

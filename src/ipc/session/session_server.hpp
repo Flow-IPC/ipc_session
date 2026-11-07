@@ -121,21 +121,21 @@ namespace ipc::session
  *       simply a PID file, a fairly typical construct in Unix daemons.  Therefore:
  *       - Session_server writes this in its ctor.
  *       - The name is, as of this writing, X.libipc-cns.pid, where X is Server_app::m_name.
- *       - The location is either a sensible default (/var/run as of this writing) or an override path
+ *       - The location is either a sensible default (`/var/run` as of this writing) or an override path
  *         Server_app::m_kernel_persistent_run_dir_override.  (Reminder: the same `Server_app`s, by value, must
  *         be registered in all processes, whether client or server or both.  Hence this override will be
  *         agreed-upon on both sides.)
  *       - Client_session::sync_connect() shall check this file immediately to know to which server process --
  *         Session_server -- to connect.
  *   - All processes in the IPC universe must share one PID namespace (relevant when using containers).
- *     See guided Manual page @ref safety_perms (section @ref pid_namespace).
+ *     See @ref pid_namespace "this section" of guided Manual page @ref safety_perms.
  *
  * As of this writing we expect Session_server to be in charge of maintaining the process's only
  * PID file, in the sense that a typical daemon is expected to maintain a general-use PID file, with the usual
  * format (where the file contains a decimal encoding of the PID plus a newline).  If this
  * is not acceptable -- i.e., we don't want the ::ipc system to "step" on some other mechanism for PID files
  * already in use -- then the location may be tweaked, at least via Server_app::m_kernel_persistent_run_dir_override
- * or possibly with a different default than the current choice (/var/run).
+ * or possibly with a different default than the current choice (`/var/run`).
  *
  * ### Thread safety; handler invocation ###
  * After construction of `*this`, concurrent access to API methods and the dtor is not safe, unless all methods

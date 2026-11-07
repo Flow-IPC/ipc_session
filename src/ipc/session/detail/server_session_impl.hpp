@@ -181,7 +181,7 @@ namespace ipc::session
  * @tparam Mdt_payload
  *         See #Server_session counterpart.
  * @tparam SHM_TYPE_OR_NONE
- *         See common.capnp `ShmType` capnp-`enum` definition.
+ *         See `common.capnp` `ShmType` capnp-`enum` definition.
  * @tparam SHM_MAX_HNDL_SZ
  *         Ignored if `SHM_TYPE_OR_NONE` indicates we are not SHM-enabled, this otherwise indicates the max
  *         size of a SHM handle's blob serialization.  If ignored it must be set to 0 (convention).

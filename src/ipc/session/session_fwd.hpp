@@ -362,7 +362,7 @@ using Server_session
  *         Session::Channel_obj (channel openable via `open_channel()` on this or other side) type config:
  *         Enumeration constant that specifies which type of MQ to use (corresponding to all available
  *         transport::Persistent_mq_handle concept impls) or to not use one (`NONE`).  Note: This `enum` type is
- *         capnp-generated; see common.capnp for values and brief docs.
+ *         capnp-generated; see `common.capnp` for values and brief docs.
  * @tparam TRANSMIT_NATIVE_HANDLES
  *         Session::Channel_obj (channel openable via `open_channel()` on this or other side) type config:
  *         Whether it shall be possible to transmit a native handle via the channel.

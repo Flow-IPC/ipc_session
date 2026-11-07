@@ -171,8 +171,8 @@ struct App
    *       Server_app's -- or any registered Client_app's -- #m_name is empty or contains
    *       util::Shared_name::S_SEPARATOR.
    *
-   * So if #m_name is "abcDef" one can do things like "/some/dir/abcDef/some_file" and "/some/dir/abcDef.pid/file"
-   * and "/some/dir/prefix.abcDef.3" (file-system example) or "_some_dir_abcDef_moreStuff" (`Shared_name` example).
+   * So if #m_name is "abcDef" one can do things like `/some/dir/abcDef/some_file` and `/some/dir/abcDef.pid/file`
+   * and `/some/dir/prefix.abcDef.3` (file-system example) or "_some_dir_abcDef_moreStuff" (`Shared_name` example).
    * I.e., #m_name can be safely used as a conceptual "token," even when combined with path/name separators and
    * dot-extension naming.
    */
@@ -260,19 +260,19 @@ struct Server_app : public App
    * Absolute path to the directory (without trailing separator) in the file system where kernel-persistent
    * runtime, but not temporary, information shall be placed for this particular application; leave empty to
    * use the default system path instead.  Informally: In production it is recommended to leave this
-   * empty, as the default system path is a well known location (namely /var/run) where one would expect to find
+   * empty, as the default system path is a well known location (namely `/var/run`) where one would expect to find
    * such files.
    *
    * Kernel-persistent means that it'll disappear at reboot; runtime, but not temporary, means it's... not a
-   * thing that might be wiped spuriously anytime (informally: not /tmp).  Informally: just know that it is normally
-   * /var/run, and that it stores things such as process-ID (PID) files.
+   * thing that might be wiped spuriously anytime (informally: not `/tmp`).  Informally: just know that it is normally
+   * `/var/run`, and that it stores things such as process-ID (PID) files.
    *
    * It shall be a Unix path and absolute (starts with forward-slash) (and lacks a root-name).  Informally it is
    * probably best for it to be lexically normal as well.
    *
    * ### Rationale ###
    * Why allow this override, if the default is sensible?  Answer: The default usually requires admin privileges
-   * for writing.  For test/debug purposes a location like /tmp or /tmp/var/run can be convenient.
+   * for writing.  For test/debug purposes a location like `/tmp` or `/tmp/var/run` can be convenient.
    */
   fs::path m_kernel_persistent_run_dir_override;
 

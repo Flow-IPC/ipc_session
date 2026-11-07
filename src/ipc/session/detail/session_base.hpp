@@ -291,8 +291,8 @@ protected:
    *
    * ### Why 8Ki? ###
    * By default in Linux POSIX MQs this happens to be the actual limit for message size --
-   * visible in /proc/sys/fs/mqueue/msgsize_max -- so we cannot go higher typically.  However that file can be modified.
-   * For now we assume a typical environment; or at least that it will not go *below* this typical default.
+   * visible in `/proc/sys/fs/mqueue/msgsize_max` -- so we cannot go higher typically.  However that file can be
+   * modified.  For now we assume a typical environment; or at least that it will not go *below* this typical default.
    * If we did try a higher number here, opening of MQs by server will likely emit an error and refuse
    * (Server_session_impl::make_channel_mqs()).
    *
