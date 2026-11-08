@@ -41,10 +41,10 @@ namespace ipc::session::sync_io
  * @see util::sync_io doc header -- describes the general `sync_io` pattern we are following.
  * @see session::Client_session_mv, session::Client_session, et al.
  *
- * As is generally the case when choosing `sync_io::X` versus `X`, we recommend using `X` due to it being easier.
- * In this particular case (see below) there is no perf benefit to using `sync_io::X`, either, so the only reason
- * to use `sync_io::X` in this case would be because you've got an old-school reactor event loop with
- * a `poll()` or `epoll_wait()`, in which case the `sync_io` API may be easier to integrate.
+ * In this particular case (see below) `sync_io::X` is internally built on `X`, so it does not avoid background
+ * threads and offers no perf benefit.  So the reason to use `sync_io::X` here would be that you've got an
+ * old-school reactor event loop with a `poll()` or `epoll_wait()`, in which case the `sync_io` API may be easier
+ * to integrate.  Otherwise `X` does the same job with a smaller API.
  *
  * To use it:
  *   - Construct it explicitly.  As with an async-I/O `Client_session` you will need to provide:
@@ -52,7 +52,7 @@ namespace ipc::session::sync_io
  *     - (Optional -- if you want to enable channel passive-open): Channel passive-open handler
  *       (though it will be invoked via... ditto).
  *   - Set up `sync_io` pattern using start_ops() (and if needed precede it with replace_event_wait_handles()).
- *   - Use `core->sync_connect()` in identical fashion to async-I/O `Client_session`.
+ *   - Use `core()->sync_connect()` in identical fashion to async-I/O `Client_session`.
  *   - On successful connect:
  *     - Be ready for error handler to fire (in `sync_io` style).
  *     - Be ready for passive-channel-open handler to fire (in `sync_io` style).
@@ -70,14 +70,14 @@ namespace ipc::session::sync_io
  * sync_io::Client_session_adapter.
  *
  * @todo Make all of Server_session_adapter, Client_session_adapter move-ctible/assignable like their adapted
- * counterparts.  It is not of utmost importance practically, unlike for the adapter guys, but at least for
+ * counterparts.  It is not of utmost importance practically, unlike for the adapted guys, but at least for
  * consistency it would be good; and of course it never hurts usability even if not critical.
  * (Internally: This is not difficult to implement; the async-I/O guys being movable was really the hard part.)
  *
  * @tparam Session
  *         The async-I/O `Client_session` concrete type being adapted.  As of this writing that would be one of
  *         at least: `session::Client_session<knobs>`, `session::shm::classic::Client_session<knobs>`,
- *         `session::shm::jemalloc::Client_session<knobs>`.
+ *         `session::shm::arena_lend::jemalloc::Client_session<knobs>`.
  */
 template<typename Session>
 class Client_session_adapter :
@@ -187,7 +187,7 @@ template<typename Event_wait_func_t>
 bool Client_session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
 {
   return Base::start_ops(std::move(ev_wait_func));
-} // Session_adapter::start_ops()
+}
 
 template<typename Session>
 template<typename Create_ev_wait_hndl_func>

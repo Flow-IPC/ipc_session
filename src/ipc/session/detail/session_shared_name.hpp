@@ -25,14 +25,14 @@ namespace ipc::session
 {
 
 /* Normally we'd put these prototypes into detail/session_fwd.hpp nearby; but there are some minor subtleties
- * preventing this.  For one there's a reference to Shared_name::S_SENTINEL as a defaul arg, which means
+ * preventing this.  For one there's a reference to Shared_name::S_SENTINEL as a default arg, which means
  * #include "ipc/util/shared_name.hpp" would be needed -- not cool in a _fwd.hpp.  Secondly there's the
  * many references to Shared_name -- which session_fwd.hpp aliases to util::Shared_name -- but session_fwd.hpp
  * needs detail/session_fwd.hpp for other reasons; so this creates a circular issue.  Because of these,
- * it's not in detail/session_fwd.hpp; nor in some kind of seaparate session_shared_name_fwd.hpp either.
+ * it's not in detail/session_fwd.hpp; nor in some kind of separate session_shared_name_fwd.hpp either.
  *
  * It's not really a huge deal, but it *is* a break from the recommended _fwd.hpp convention; seemed worth
- * explaining. */
+ * explaining.  @todo Revisit. */
 
 // Free functions.
 
@@ -164,7 +164,7 @@ bool decompose_conventional_shared_name(const Shared_name& name,
  *        (global-scope).  If null ignored.
  * @param srv_namespace_or_sentinel
  *        If not-null, pointee is set to `srv_namespace_or_sentinel` as-if given to build_conventional_shared_name()
- *        overload 2 (global-scope).  If null ignored.  This will may equal `S_SENTINEL`.
+ *        overload 2 (global-scope).  If null ignored.  This may equal `S_SENTINEL`.
  * @param the_rest
  *        If not-null, pointee is set to whatever follows the above components (even if some or all of their out-args
  *        were null), the `S_SENTINEL`, and the `S_SEPARATOR` immediately following the last of the above components.
@@ -191,5 +191,21 @@ bool decompose_conventional_shared_name(const Shared_name& name,
  * @return Absolute path prefix ending `S_SEPARATOR`.
  */
 Shared_name build_conventional_shared_name_prefix(const Shared_name& resource_type, const Shared_name& srv_app_name);
+
+/**
+ * Returns a client-namespace value (see Session_base::cli_namespace()) not previously returned in this process; for
+ * a session-server to assign to a session it is opening.  Thread-safe.
+ *
+ * ### Rationale ###
+ * Why unique process-wide and not merely per `Session_server`?  A later `Session_server` for the same Server_app in
+ * the same process has the same server namespace (the PID); so, were the client-namespaces to restart, it would
+ * produce the per-session resource names (MQs, SHM pools) of the earlier one's sessions.  Those must no longer exist
+ * by then, per the documented rules as of this writing (and multiple sequential `_server`s in a process is itself
+ * exotic); but this way no collision is possible, even if they do.  It's also probably nice for grokking logs/reporting
+ * after the fact (an object name for the same process will not be used more than once).
+ *
+ * @return See above.
+ */
+Shared_name next_cli_namespace();
 
 } // namespace ipc::session

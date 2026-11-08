@@ -20,6 +20,7 @@
 
 #include "ipc/session/session.hpp"
 #include "ipc/session/detail/client_session_impl.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 #include <boost/move/make_unique.hpp>
 
 namespace ipc::session
@@ -107,7 +108,7 @@ namespace ipc::session
  *
  * ### Thread safety and handler invocation semantics ###
  * These follow the Session concept policies.
-
+ *
  * ### Error handling ###
  * Once in PEER state, error handling follows the Session concept (= Session_mv concrete class) doc header.
  * Up to that point (in NULL state) there are no public asynchronous operations; there is just sync_connect() which
@@ -149,6 +150,16 @@ public:
   /// Short-hand for our base class.  To the user: note its `public` API is inherited.
   using Base = Session_mv<Client_session_impl_t>;
 
+  /// You may disregard.
+  using Async_io_obj = transport::Null_peer;
+  /// Useful for generic programming, the `sync_io`-pattern counterpart to `*this` type.
+  using Sync_io_obj = sync_io::Client_session_adapter<Client_session_mv>;
+
+  // Constants.
+
+  /// Implements Session API per contract: equals `false`.
+  static constexpr bool S_IS_SRV_ELSE_CLI = false;
+
   // Constructors/destructor.
 
   /// Inherit all ctors from Session_mv (default, move).
@@ -156,6 +167,10 @@ public:
 
   /**
    * Constructs (passive-opens allowed form) in NULL state.  To be useful, invoke sync_connect() next.
+   *
+   * @warning `cli_app_ref` and `srv_app_ref` must remain alive throughout `*this` lifetime: their *addresses*
+   *          are stored and accessed at various points later.  This is consistent with the intended
+   *          global-registry lifecycle of Client_app/Server_app/App; see the `struct` App doc header.
    *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
@@ -180,6 +195,11 @@ public:
 
   /**
    * Constructs (passive-opens disallowed form) in NULL state.  To be useful, invoke sync_connect() next.
+   *
+   * @warning `cli_app_ref` and `srv_app_ref` must remain alive throughout `*this` lifetime: their *addresses*
+   *          are stored and accessed at various points later (e.g., when `ostream<<` prints `*this`).  This is
+   *          consistent with the intended global-registry lifecycle of Client_app/Server_app/App; see the
+   *          `struct` App doc header.
    *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
@@ -209,8 +229,6 @@ public:
    *   - If invoked in PEER state: pass to open_channel().
    *
    * @return See above.
-   *
-   * @see Session::mdt_builder(): implemented concept.
    */
   Mdt_builder_ptr mdt_builder();
 
@@ -238,22 +256,29 @@ public:
    *     application.
    *   - The location of this file is determined by Server_app contents.  Namely, Server_app::m_name, at least,
    *     is unique per Server_app in the universe, and most of the PID file's name comprises it; and
-   *     its location comprises Server_app::m_kernel_persistent_run_dir_override and/or /var/run (or equivalent).
-   *   - sync_connect() reads the CNS (PID) file at that location, unique among `Server_app`s.  Now it knows
+   *     its location comprises Server_app::m_kernel_persistent_run_dir_override and/or `/var/run` (or equivalent).
+   *   - sync_connect() reads the CNS (PID file) at that location, unique among `Server_app`s.  Now it knows
    *     "where" to connect in order to open the session; so it won't accidentally connect to some old zombie
    *     instance of the Server_app (its PID wouldn't be in the CNS file any longer) or another application entirely
    *     (its PID file would be located elsewhere and never accessed by this sync_connect()).
+   *   - Having connected, and before exchanging any session-protocol messages, sync_connect() checks the
+   *     OS-reported identity of the process at the other end against what it expected: for example its process ID must
+   *     equal the one read from the CNS (PID file); and the UID, GID, and executable path must match Server_app.
+   *     (The opposing Session_server symmetrically checks this side against its Client_app registry.)  A mismatch
+   *     fails sync_connect() with error::Code::S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS.  (This is a
+   *     safety measure -- against a stale CNS or an inconsistent IPC universe description -- not a security
+   *     one; see guided Manual page @ref safety_perms.)
    *
-   * ### What if the CNS (PID) file does not exist?  What if server is inactive? ###
+   * ### What if the CNS (PID file) does not exist?  What if server is inactive? ###
    * Then sync_connect() will quickly fail (file-not-found or connection-refused error).  Shouldn't we supply some
-   * API to await its appearance and actively listening?  Answer: Probably not.  Why? 
+   * API to await its appearance and actively listening?  Answer: Probably not.  Why?
    * Answer: Consider the situation where the PID file is there, but
    * it belongs to a now-exited instance of the Server_app; let's say it is currently suspended or restarting.
    * sync_connect() will fail then too: There is nothing listening (anymore) at the advertised PID.  So
    * it'll quickly fail (connection-refused error).  So then we'd also need an API to await an active server's
    * appearance whether or not the PID exists.  That leads to the following to-do:
    *
-   * @todo Consider adding an optional mode/feature to allow to wait through the condition wherein CNS (PID) file does
+   * @todo Consider adding an optional mode/feature to allow to wait through the condition wherein CNS (PID file) does
    * not exist, or it does but the initial session-open connect op would be refused; instead it detects these relatively
    * common conditions (server not yet up and/or is restarting and/or is operationally suspended for now, etc.) as
    * normal and waits until the condition is cleared.  Without this mode, a typical user would probably do
@@ -268,12 +293,14 @@ public:
    *
    * @param err_code
    *        See `flow::Error_code` docs for error reporting semantics.  #Error_code generated:
-   *        session::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER (destructor called, canceling all pending ops;
-   *        spiritually identical to `boost::asio::error::operation_aborted`),
    *        interprocess-mutex-related errors (probably from boost.interprocess) w/r/t reading the CNS (PID file),
    *        file-related system errors w/r/t reading the CNS (PID file) (see Session_server doc header for background),
    *        error::Code::S_CLIENT_NAMESPACE_STORE_BAD_FORMAT (bad CNS contents),
    *        those emitted by transport::Native_socket_stream::sync_connect(),
+   *        those returned by transport::Native_socket_stream::remote_peer_process_credentials() and
+   *        util::Process_credentials::process_invoked_as(),
+   *        error::Code::S_CLIENT_MASTER_LOG_IN_SERVER_APP_INCONSISTENT_CREDS (connected process is not the
+   *        configured Server_app and/or not the instance advertised in the CNS (PID file)),
    *        those emitted by transport::struc::Channel::send(),
    *        those emitted by transport::struc::Channel via on-error handler (most likely
    *        transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE indicating graceful shutdown of opposing process
@@ -282,7 +309,7 @@ public:
    *        error::Code::S_INVALID_ARGUMENT (other side expected other sync_connect() overload with
    *        non-null `init_channels_by_srv_req` arg).
    */
-  bool sync_connect(Error_code* err_code = 0);
+  bool sync_connect(Error_code* err_code = nullptr);
 
   /**
    * Identical to the simpler sync_connect() overload but offers added advanced capabilities: metadata exchange;
@@ -347,11 +374,10 @@ public:
    * @return See other sync_connect() overload.
    */
   bool sync_connect(const typename Base::Mdt_builder_ptr& mdt,
-                    typename Base::Channels* init_channels_by_cli_req_pre_sized = 0,
-                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null = 0,
-                    typename Base::Channels* init_channels_by_srv_req = 0,
-                    Error_code* err_code = 0);
-
+                    typename Base::Channels* init_channels_by_cli_req_pre_sized = nullptr,
+                    typename Base::Mdt_reader_ptr* mdt_from_srv_or_null = nullptr,
+                    typename Base::Channels* init_channels_by_srv_req = nullptr,
+                    Error_code* err_code = nullptr);
 
   // The LOG_*() macros don't see Log_context::get_log*() from base otherwise....
   using Base::get_logger;

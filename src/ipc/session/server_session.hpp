@@ -20,6 +20,8 @@
 
 #include "ipc/session/session.hpp"
 #include "ipc/session/detail/server_session_impl.hpp"
+#include "ipc/session/detail/session_fwd.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 #include <boost/move/make_unique.hpp>
 
 namespace ipc::session
@@ -47,9 +49,12 @@ namespace ipc::session
  * (hence Server_session_mv to which it aliases) is its super-class, and until PEER state is reached its
  * API (init_handlers()) remains the only relevant API to use.  Once Server_session_mv::init_handlers()
  * puts `*this` into PEER state, super-class Session_mv (= Session concept) API continues to be relevant.
- * Also in PEER state SHM-relevant additional API members (e.g. shm::classic::Session::app_shm()`) become of interest.
- * The last two sentences describe the situation identically for Client_session_mv as well (see its doc header
- * for context).
+ * Also in PEER state SHM-relevant additional API members (e.g., shm::classic::Session_mv::app_shm()) become of
+ * interest.  The last two sentences describe the situation identically for Client_session_mv as well (see its
+ * doc header for context).
+ *
+ * Regarding when to destroy `*this`, relative to the objects around it (its channels et al; the Session_server that
+ * produced it): see Session_server doc header, section "How to use: Lifetime recommendations and requirements."
  *
  * Summary hierarchy (contrast with similar spot in Client_session_mv doc header):
  *   - Session_mv (Session concept impl)
@@ -102,8 +107,8 @@ namespace ipc::session
  *   -# construct it;
  *   -# call async_accept_log_in() and await its success.
  *
- * These APIs are `protected` in Server_session_mv.  The detail/ sub-class Server_session_dtl exposes them publicly
- * (but only accessible, by convention, internally; namely by Session_server).
+ * These APIs are `private` in Server_session_mv.  The detail/ `friend`-facade type Server_session_dtl exposes them
+ * publicly (but only accessible, by convention, internally; namely by Session_server).
  *
  * As of this writing the SHM-enabled Session_server variants (e.g., shm::classic::Session_server) do not require
  * any additional internally-accessed APIs.  Instead they employ 3 "customization points" using which avoids
@@ -127,6 +132,16 @@ public:
 
   /// Short-hand for our base class.  To the user: note its `public` API is inherited.
   using Base = Session_mv<Server_session_impl_t>;
+
+  /// You may disregard.
+  using Async_io_obj = transport::Null_peer;
+  /// Useful for generic programming, the `sync_io`-pattern counterpart to `*this` type.
+  using Sync_io_obj = sync_io::Server_session_adapter<Server_session_mv>;
+
+  // Constants.
+
+  /// Implements Session API per contract: equals `true`.
+  static constexpr bool S_IS_SRV_ELSE_CLI = true;
 
   // Constructors/destructor.
 
@@ -188,6 +203,18 @@ public:
   using Base::get_log_component;
 
 protected:
+  // Types.
+
+  /// See Session_mv counterpart.
+  using Session_base_obj = typename Base::Session_base_obj;
+
+private:
+  // Friends.
+
+  /// Facade type that exposes specific `private` APIs of `*this` to other internal Flow-IPC code.
+  template<typename T>
+  friend struct Server_session_dtl;
+
   // Constructors.
 
   /**
@@ -211,7 +238,7 @@ protected:
    * For use by internal user Session_server: called no more than once, ideally immediately following ctor,
    * this attempts to get `*this` asynchronously to almost-PEER state by undergoing the log-in request/response
    * (plus, if needed, init-channel-opening) procedure (the other side of which is done by
-   * Client_session_impl::sync_connect()).  On success, `on_done_func(Error_code())` is invoked from unspecified
+   * Client_session_impl::sync_connect()).  On success, `on_done_func(Error_code{})` is invoked from unspecified
    * thread that is not the user's calling thread.  On failure, it does similarly but with a non-success code.
    * If the op does not complete before dtor, then
    * `on_done_func(error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER)` is invoked at that point.
@@ -221,8 +248,15 @@ protected:
    *
    * #Error_code generated and passed to `on_done_func()`:
    * session::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER (see above),
-   * those returned by transport::Native_socket_stream::remote_peer_process_credentials(),
-   * those emitted by transport::struc::Channel::send(),
+   * those returned by transport::Native_socket_stream::remote_peer_process_credentials() and
+   * util::Process_credentials::process_invoked_as(),
+   * those emitted by transport::Protocol_negotiator::compute_negotiated_proto_ver() (protocol-version mismatch),
+   * error::Code::S_SERVER_MASTER_LOG_IN_REQUEST_CONFIG_MISMATCH,
+   * error::Code::S_INVALID_ARGUMENT (other side expected other async_accept() overload with
+   * non-null `init_channels_by_cli_req` arg),
+   * error::Code::S_SESSION_OPEN_CHANNEL_SERVER_CANNOT_PROCEED_RESOURCE_UNAVAILABLE (unable to acquire init-channel
+   * resources),
+   * those emitted by transport::struc::Channel::send() and `sync_request()`,
    * those emitted by transport::struc::Channel via on-error handler (most likely
    * transport::error::Code::S_RECEIVES_FINISHED_CANNOT_RECEIVE indicating graceful shutdown of opposing process
    * coincidentally during log-in procedure, prematurely ending session while it was starting),
@@ -246,20 +280,24 @@ protected:
    *         as Session_base::set_cli_namespace() is required before #Server_session can be in PEER state and available
    *         to the public user.
    * @tparam Pre_rsp_setup_func
-   *         Function type with signature `Error_code F()`.
+   *         Function type with signature `Error_code F(const Client_app& cli_app)`.
    * @tparam N_init_channels_by_srv_req_func
    *         See Session_server::async_accept().  Type and arg value forwarded from there.
    * @tparam Mdt_load_func
    *         See Session_server::async_accept().  Type and arg value forwarded from there.
    * @param srv
    *        The Session_server_impl whose Session_server_impl::async_accept() is invoking the present method.
-   *        `*srv` must exist at least while `*this` does, or behavior is undefined.
+   *        `*srv` must exist at least until `on_done_func()` is invoked (or `*this` is destroyed, if sooner), or
+   *        behavior is undefined; `*this` does not use it after that.
    *        This allows for interaction/cooperation with the "parent" `Session_server` if necessary, such as
    *        for shared cross-session resources.
    *        Note: you may use `srv->this_session_srv()` to obtain a pointer to the `Session_server`-like object
    *        on which the user invoked `async_accept()`.  E.g.: Server_session_impl::async_accept_log_in()
    *        would get a `Session_server*`; shm::classic::Server_session_impl::async_accept_log_in() would get
    *        a `shm::classic::Session_server*`.
+   * @param mq_msg_size_limit
+   *        Session_server::mq_msg_size_limit() value as of the Session_server::async_accept() call; `*this` uses it
+   *        for every MQ-enabled channel it opens.  Ignored unless `S_MQS_ENABLED`.
    * @param init_channels_by_srv_req
    *        See Session_server::async_accept().  Arg value forwarded from there.
    * @param mdt_from_cli_or_null
@@ -272,8 +310,9 @@ protected:
    *        See `Cli_namespace_func`.
    * @param pre_rsp_setup_func
    *        Invoked just before sending successful log-in response to opposing client, which completes the log-in.
-   *        It takes no arguments -- but all `*this` accessors up to/including `cli_app_ptr()` shall return
-   *        real values -- and shall return falsy on success; or the reason for failure as #Error_code.
+   *        It takes the opposing Client_app (`*cli_app_ptr()`, by then known; all `*this` accessors up to/including
+   *        `cli_app_ptr()` shall return real values) and shall return falsy on success; or the reason for failure
+   *        as #Error_code.
    *        In the latter case this method shall emit that code as the reason for overall failure.
    *        This can be used for setting up resources, such as SHM arena(s), that the client shall count
    *        on being available (perhaps at known #Shared_name based on `*this` accessor values).
@@ -287,7 +326,7 @@ protected:
   template<typename Session_server_impl_t,
            typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
            typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
-  void async_accept_log_in(Session_server_impl_t* srv,
+  void async_accept_log_in(Session_server_impl_t* srv, size_t mq_msg_size_limit,
                            typename Base::Channels* init_channels_by_srv_req,
                            typename Base::Mdt_reader_ptr* mdt_from_cli_or_null,
                            typename Base::Channels* init_channels_by_cli_req,
@@ -330,7 +369,7 @@ template<typename Session_server_impl_t,
          typename Task_err, typename Cli_app_lookup_func, typename Cli_namespace_func, typename Pre_rsp_setup_func,
          typename N_init_channels_by_srv_req_func, typename Mdt_load_func>
 void CLASS_SRV_SESSION_MV::async_accept_log_in
-       (Session_server_impl_t* srv,
+       (Session_server_impl_t* srv, size_t mq_msg_size_limit,
         typename Base::Channels* init_channels_by_srv_req,
         typename Base::Mdt_reader_ptr* mdt_from_cli_or_null,
         typename Base::Channels* init_channels_by_cli_req,
@@ -342,7 +381,7 @@ void CLASS_SRV_SESSION_MV::async_accept_log_in
         Task_err&& on_done_func)
 {
   assert(Base::impl() && "Session default ctor is meant only for being moved-to.  Internal bug?");
-  Base::impl()->async_accept_log_in(srv,
+  Base::impl()->async_accept_log_in(srv, mq_msg_size_limit,
                                     init_channels_by_srv_req,
                                     mdt_from_cli_or_null,
                                     init_channels_by_cli_req,

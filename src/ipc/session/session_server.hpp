@@ -20,6 +20,7 @@
 
 #include "ipc/session/server_session.hpp"
 #include "ipc/session/detail/session_server_impl.hpp"
+#include "ipc/transport/transport_fwd.hpp"
 
 namespace ipc::session
 {
@@ -39,20 +40,38 @@ namespace ipc::session
  *
  * Note that while in a typical (non-test/debug) scenario one would only instantiate a single
  * Session_server, that does *not* mean it cannot or should not instantiate `Client_session`s as well.
- * In a *given* split, a given application is either the server or the client; but in a different split it
+ * In a *given* split, a given application is either the server or the client; but in a different split it can
  * be the other thing.  So a Session_server handles all the splits in which this application is the
  * server; but for other splits one would instantiate 0+ `Client_session`s separately.
  *
  * ### How to use ###
  * Similarly to transport::Native_socket_stream_acceptor constructing `*this` immediately async-listens to
- * incoming connections (each an attempt to establish a opposing Client_session to partner with a new local
- * #Server_session).  async_accept() shall accept such connections, one at a time, in FIFO order (including any
+ * incoming connections (each an attempt to establish an opposing Client_session to partner with a new
+ * local #Server_session).  async_accept() shall accept such connections, one at a time, in FIFO order (including any
  * that may have queued up in the meantime, including after mere construction).  The meaning of FIFO order
  * is discussed below.
  *
  * Once a #Server_session is emitted to a handler passed to async_accept(), refer to #Server_session doc header
  * for how to operate it.  Spoiler alert: you must still call `Server_session::init_handlers()`; at which point
  * the #Server_session is a Session concept impl in PEER state.
+ *
+ * ### How to use: Lifetime recommendations and requirements ###
+ * The lifetime tenets, in one place.  (The Manual's session-teardown page discusses them at more length.)
+ *   -# *Per-session things before their `Session`.*  Channels, structured messages -- and, with a SHM-enabled
+ *      variant such as session::shm::classic::Session_server, SHM handles and objects -- are destroyed first; then
+ *      the `Session`.  (Likewise on the client side.)
+ *   -# *`Session`s before their `Session_server`.*  Construction goes `*this`, then sessions; destruction the
+ *      reverse.
+ *   -# *One `Session_server` per Server_app at a time.*  A new one may follow an old one -- typically because the
+ *      session-server process restarted -- but never while any `Session` or channel from the old one still exists:
+ *      the new one's startup cleanup removes their kernel-persistent names (MQs, SHM pools).
+ *
+ * Some departures from the above do work; informally we recommend against relying on them, as doing so tends to
+ * indicate a design that will cause pain later.  Namely: a channel outliving its `Session` (they are formally
+ * independent; though if the session was hosed by the opposing side, the channel usually goes down with it);
+ * a #Server_session outliving `*this` (it keeps working -- with a SHM-enabled variant, its app-scope arena included;
+ * a `Server_session` emitted by a `*this` whose destructor is already running (see ~Session_server()) merely needs
+ * destroying); and a `Session_server` following another within one process.
  *
  * ### Error handling ###
  * The model followed is the typical boost.asio-like one: Each async_accept() takes a handler, F, and it is
@@ -68,7 +87,7 @@ namespace ipc::session
  *     of each problematic one.  In particular, log-in failures are of interest w/r/t safety + security.
  *   - Given that point, there is no reason to necessarily hose the entire IPC framework for this process (as a
  *     server) due to one badly behaving opposing client.
- *   - Is is unlikely that a Unix domain socket listener will fail, if it was able to begin listening.
+ *   - It is unlikely that a Unix domain socket listener will fail, if it was able to begin listening.
  *     So post-ctor problems are unlikely to occur strictly before the log-in exchange procedure.
  *
  * Informally there are a few ways one could deal with each given error.
@@ -82,7 +101,7 @@ namespace ipc::session
  * As of this writing I (ygoldfel) lack sufficient data in the field to make certain pronouncements.
  *
  * ### Relationship with Server_app and Client_app; relationship with file system ###
- * This class operates at quite a high level; there should be (outside of test/debug) only on of them in a process.
+ * This class operates at quite a high level; there should be (outside of test/debug) only one of them in a process.
  * There are some important relationships to understand:
  *   - This process must be invoked consistently with the description in Server_app as passed to its ctor.
  *     See Server_app (and therefore App) doc header.  In particular its App::m_exec_path, App::m_user_id,
@@ -101,20 +120,22 @@ namespace ipc::session
  *       good uniqueness properties.  This is saved in the so-called Current Namespace Store (CNS) which is
  *       simply a PID file, a fairly typical construct in Unix daemons.  Therefore:
  *       - Session_server writes this in its ctor.
- *       - The name is, as of this writing, X.pid, where X is Server_app::m_name.
- *       - The location is either a sensible default (/var/run as of this writing) or an override path
+ *       - The name is, as of this writing, X.libipc-cns.pid, where X is Server_app::m_name.
+ *       - The location is either a sensible default (`/var/run` as of this writing) or an override path
  *         Server_app::m_kernel_persistent_run_dir_override.  (Reminder: the same `Server_app`s, by value, must
  *         be registered in all processes, whether client or server or both.  Hence this override will be
  *         agreed-upon on both sides.)
  *       - Client_session::sync_connect() shall check this file immediately to know to which server process --
  *         Session_server -- to connect.
+ *   - All processes in the IPC universe must share one PID namespace (relevant when using containers).
+ *     See @ref pid_namespace "this section" of guided Manual page @ref safety_perms.
  *
  * As of this writing we expect Session_server to be in charge of maintaining the process's only
  * PID file, in the sense that a typical daemon is expected to maintain a general-use PID file, with the usual
  * format (where the file contains a decimal encoding of the PID plus a newline).  If this
  * is not acceptable -- i.e., we don't want the ::ipc system to "step" on some other mechanism for PID files
  * already in use -- then the location may be tweaked, at least via Server_app::m_kernel_persistent_run_dir_override
- * or possibly with a different default than the current choice (/var/run).
+ * or possibly with a different default than the current choice (`/var/run`).
  *
  * ### Thread safety; handler invocation ###
  * After construction of `*this`, concurrent access to API methods and the dtor is not safe, unless all methods
@@ -123,10 +144,10 @@ namespace ipc::session
  * You *may* invoke async_accept() directly from within another async_accept()-passed handler.
  * (Informally we suggest you post all real handling onto your own thread(s).)
  *
- * However: async_accept()-passed user handlers may be invoked *concurrently to each other* (if 2+ async_accept()s are
- * outstanding).  It is your responsibility, then, to ensure you do not invoke 2+ async_accept()s concurrently.
+ * However: async_accept()-passed user handlers may be invoked *concurrently to each other* (if 2+ `async_accept()`s are
+ * outstanding).  It is your responsibility, then, to ensure you do not invoke 2+ `async_accept()`s concurrently.
  * (One way is to only have only 1 outstanding at any given time.  Another is to post all handling on your own thread.
- * Really informally we'd say it's best to do both.)
+ * Really informally we'd say it's best to do both.  Truly: we recommend this.)
  *
  * ### Subtlety about "FIFO order" w/r/t async_accept() ###
  * Above we promise that async_accept() shall emit ready `Server_sessions`s in "FIFO" order.  The following
@@ -177,37 +198,37 @@ namespace ipc::session
  *   - emit vanilla Server_session (#Server_session_obj).
  * @endinternal
  *
- * @tparam S_MQ_TYPE_OR_NONE
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `S_MQ_TYPE_OR_NONE`.
+ * @tparam MQ_TYPE_OR_NONE
+ *         Emitted `Server_session`s shall have the concrete type based on this value for `MQ_TYPE_OR_NONE`.
  *         See #Server_session_obj.
- * @tparam S_TRANSMIT_NATIVE_HANDLES
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `S_TRANSMIT_NATIVE_HANDLES`.
+ * @tparam TRANSMIT_NATIVE_HANDLES
+ *         Emitted `Server_session`s shall have the concrete type based on this value for `TRANSMIT_NATIVE_HANDLES`.
  *         See #Server_session_obj.
  * @tparam Mdt_payload
- *         Emitted `Server_session`s shall have the concrete typed based on this value for `Mdt_payload`.
+ *         Emitted `Server_session`s shall have the concrete type based on this value for `Mdt_payload`.
  *         See #Server_session_obj.  In addition the same type may be used for `mdt_from_cli_or_null` (and srv->cli
  *         counterpart) in async_accept().  (Recall that you can use a capnp-`union` internally
  *         for various purposes.)
  */
-template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 class Session_server :
   private Session_server_impl // Attn!  Emit vanilla `Server_session`s (impl customization point: unused).
-            <Session_server<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
-             Server_session<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>>
+            <Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
+             Server_session<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>>
 {
 private:
   // Types.
 
   /// Short-hand for our base/core impl.
   using Impl = Session_server_impl
-                 <Session_server<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
-                  Server_session<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
+                 <Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>,
+                  Server_session<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>>;
 
 public:
   // Types.
 
   /// Short-hand for the concrete `Server_session`-like type emitted by async_accept().
-  using Server_session_obj = Server_session<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>;
+  using Server_session_obj = Server_session<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>;
 
   /// Short-hand for Session_mv::Mdt_reader_ptr.
   using Mdt_reader_ptr = typename Impl::Mdt_reader_ptr;
@@ -217,6 +238,11 @@ public:
 
   /// Short-hand for Session_mv::Channels.
   using Channels = typename Impl::Channels;
+
+  /// You may disregard.
+  using Async_io_obj = transport::Null_peer;
+  /// Useful for generic programming, the `sync_io`-pattern counterpart to `*this` type.
+  using Sync_io_obj = sync_io::Session_server_adapter<Session_server>;
 
   // Constructors/destructor.
 
@@ -229,17 +255,30 @@ public:
    * via normal Flow error semantics.  If this occurs, via the non-exception-throwing invocation style,
    * then you must not call async_accept(); or behavior is undefined (assertion may trip).
    *
+   * @warning `srv_app_ref` and `cli_app_master_set_ref` -- and the `Client_app`s to which the latter
+   *          (transitively) refers -- must remain alive throughout `*this` lifetime, as well as that of
+   *          any `Server_session` yielded by async_accept(): their *addresses* are stored and accessed at
+   *          various points later.  This is consistent with the intended global-registry lifecycle of
+   *          Server_app/Client_app/App; see the `struct` App doc header.
+   *
    * @param logger_ptr
    *        Logger to use for logging subsequently.
    * @param srv_app_ref
    *        Properties of this server application.  The address is copied; the object is not copied.
    * @param cli_app_master_set_ref
    *        The set of all known `Client_app`s.  The address is copied; the object is not copied.
-   *        Technically, from our POV, it need only list the `Client_app`s whose names are
+   *        Technically, from our PoV, it need only list the `Client_app`s whose names are
    *        in `srv_app_ref.m_allowed_client_apps`.  Refer to App doc header for best practices on
-   *        maintaining this master list in practice.
+   *        maintaining this master list.
    * @param err_code
    *        See `flow::Error_code` docs for error reporting semantics.  #Error_code generated:
+   *        error::Code::S_INVALID_ARGUMENT (`srv_app_ref`'s, or a `cli_app_master_set_ref` member's, App::m_name
+   *        violates the documented requirements; typically: contains underscore a/k/a util::Shared_name::S_SEPARATOR);
+   *        error::Code::S_RESOURCE_OWNER_UNEXPECTED (this process's effective UID or GID, or the owner of the
+   *        CNS (PID file), does not match `srv_app_ref`);
+   *        error::Code::S_SERVER_APP_EXEC_PATH_INCONSISTENT (this process's executable path, as invoked, does not
+   *        match `srv_app_ref.m_exec_path`);
+   *        system errors from util::Process_credentials::process_invoked_as() w/r/t this process;
    *        interprocess-mutex-related errors (probably from boost.interprocess) w/r/t writing the CNS (PID file);
    *        file-related system errors w/r/t writing the CNS (PID file) (see class doc header for background);
    *        errors emitted by transport::Native_socket_stream_acceptor ctor (see that ctor's doc header; but note
@@ -248,7 +287,7 @@ public:
    */
   explicit Session_server(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref,
                           const Client_app::Master_set& cli_app_master_set_ref,
-                          Error_code* err_code = 0);
+                          Error_code* err_code = nullptr);
 
   /**
    * Destroys this acceptor which will stop listening in the background and cancel any pending
@@ -259,6 +298,9 @@ public:
    * that internally a transport::Native_socket_stream_acceptor is used.
    *
    * You must not call this from directly within a completion handler; else undefined behavior.
+   *
+   * Regarding *when* to destroy `*this`, relative to the `Server_session`s it produced (and their channels et al):
+   * see class doc header, section "How to use: Lifetime recommendations and requirements."
    *
    * Each pending completion handler will be called from an unspecified thread that is not the calling thread.
    * Any associated captured state for that handler will be freed shortly after the handler returns.
@@ -277,7 +319,7 @@ public:
    * Asynchronously awaits for an opposing Client_session to request session establishment and calls `on_done_func()`,
    * once the connection occurs and log-in exchange completes, or an error occurs, in the former case move-assigning an
    * almost-PEER-state Server_session object to the passed-in Server_session `*target_session`.
-   * `on_done_func(Error_code())` is called on success.  `on_done_func(E)`, where `E` is a non-success
+   * `on_done_func(Error_code{})` is called on success.  `on_done_func(E)`, where `E` is a non-success
    * error code, is called otherwise.  In the latter case `*this` may continue operation, and further `async_accept()`s
    * may succeed.  See class doc header regarding error handling.
    *
@@ -293,7 +335,7 @@ public:
    * place the true on-event logic onto some task loop of your own; so ideally it would consist of essentially a
    * single `post(F)` statement of some kind.
    *
-   * You must not call this from directly within a completion handler; else undefined behavior.
+   * You may call this from directly within a completion handler (see class doc header, "Thread safety").
    *
    * #Error_code generated and passed to `on_done_func()`:
    * session::error::Code::S_OBJECT_SHUTDOWN_ABORTED_COMPLETION_HANDLER (destructor called, canceling all pending ops;
@@ -315,9 +357,10 @@ public:
    *
    * ### Error handling discussion ###
    * See class doc header regarding error handling, then come back here.
-   * The last 3 specific #Error_code values listed can be considered, informally, individual misbehavior on
-   * the part of the opposing client process.  While indicating potentially serious misconfiguration in the system,
-   * surely to be investigated ASAP, it is conceivable to continue attempting further `async_accept()`s.
+   * The ipc::session-specific #Error_code values listed (other than operation-aborted) can be considered,
+   * informally, individual misbehavior on the part of the opposing client process.  While indicating potentially
+   * serious misconfiguration in the system, surely to be investigated ASAP, it is conceivable to continue
+   * attempting further `async_accept()`s.
    *
    * Do note, though, that this is not a network client-server situation.  That is, probably, one should not expect
    * lots of -- or any -- such problems in a smoothly functioning IPC universe on a given production server machine.
@@ -325,12 +368,28 @@ public:
    * mismatch between client and server w/r/t their master App sets.  Your software deployment story may or may not
    * be designed to allow for this as a transient condition during software upgrades and such.
    *
+   * So now the key question: what are you supposed to do about it?
+   *   - Informally our recommendation is, at least in a generally highly-available daemon situation:
+   *     Log about it; then issue a async_accept() (try again).  Reason: Assuming you've set up your
+   *     safety story properly -- the session::App info is all accurate and consistent, etc. -- this usually
+   *     means something like an unexpected disconnect in the middle of the fairly hefty ipc::Session
+   *     hand-shaking.  Less likely is the system being out of some resource such as reaching a SHM kernel object
+   *     limit or something.  Since the likeliest reason is recoverable, and could happen when generally
+   *     things are fine, it is best to assume that and continue as normal.
+   *     - But!  Ensure any such errors are carefully investigated (e.g., trigger alerts humans must look at...
+   *       or whatever).
+   *
    * @tparam Task_err
    *         Handler type matching signature of `flow::async::Task_asio_err`.
    * @param target_session
-   *        Pointer to Server_session which shall be assigned an almost-PEER-state (open, requires
-   *        Server_session::init_handlers() to enter PEER state) as `on_done_func()`
-   *        is called.  Not touched on error.
+   *        Pointer to the target Server_session.  It is made as-if default-cted synchronously, immediately at
+   *        entry to this method, before the accept procedure asynchronously proceeds -- as-if you had called
+   *        `*target_session = {}` just before calling this method.  If `*target_session` is already in NULL state,
+   *        which we informally recommend, that step is a no-op.  Otherwise the considerable resources
+   *        of the PEER- or almost-PEER-state `Session` are freed per `*this` class's dtor docs.  After that,
+   *        asynchronously: On success `*target_session` becomes an almost-PEER-state session (open; requires
+   *        `init_handlers()` to enter PEER state) just before `on_done_func()` is called.  On failure
+   *        `*target_session` remains in NULL state (as-if default-cted).
    * @param on_done_func
    *        Completion handler.  See above.  The captured state in this function object shall be freed shortly upon
    *        its completed execution from the unspecified thread.
@@ -359,7 +418,7 @@ public:
    * (internally) the log-in request from the client side:
    *   - the Client_app that wishes to open the session;
    *   - how many init-channels the client is requesting be opened (see below);
-   *   - the client->Server metadata (see below).
+   *   - the client->server metadata (see below).
    *
    * Thus supply `Mdt_load_func mdt_load_func` arg which takes all 3 of these data, plus a blank
    * capnp `Mdt_payload` structure to fill; and loads the latter as desired.
@@ -369,7 +428,7 @@ public:
    *
    * ### Client->server metadata exchange ###
    * This is the reverse of the above.  Whatever the opposing client chose to supply as client->server metadata
-   * shall be deserializable at `*mdt_from_cli_or_null` once (and if) `on_done_func(Error_code())` (successful
+   * shall be deserializable at `*mdt_from_cli_or_null` once (and if) `on_done_func(Error_code{})` (successful
    * accept) fires.  If `mdt_from_cli_or_null` is null, the cli->srv metadata shall be ignored.
    *
    * ### Init-channels by server request ###
@@ -380,7 +439,7 @@ public:
    * with the freshly-open session -- to both sides.
    *
    * The server may request 0 or more init-channels.  They shall be opened and placed into
-   * `*init_channels_by_srv_req`.  The number of channels requested may depend on the 3 piece of info outlined
+   * `*init_channels_by_srv_req`.  The number of channels requested may depend on the 3 pieces of info outlined
    * above in "Server->client metadata exchange."  Thus supply `N_init_channels_by_srv_req_func
    * n_init_channels_by_srv_req_func` arg which takes all 3 of these data and returns the `size_t` channel
    * count (possibly 0).  The resulting channels shall be loaded into `*init_channels_by_srv_req`
@@ -393,11 +452,11 @@ public:
    * ### Init-channels by client request ###
    * This is the reverse of the above.  The opposing side shall request 0 or more init-channels-by-client-request;
    * that number of channels shall be opened; and they will be placed into `*init_channels_by_cli_req` which shall
-   * be `->resize()`d accordingly, once (and if) `on_done_func(Error_code())` (successful
+   * be `->resize()`d accordingly, once (and if) `on_done_func(Error_code{})` (successful
    * connect) fires.
    *
-   * `init_channels_by_srv_cli` being null is allowed, but only if the opposing server requests 0
-   * init-channels-by-server-request.  Otherwise an error shall be emitted (see below).
+   * `init_channels_by_cli_req` being null is allowed, but only if the opposing client requests 0
+   * init-channels-by-client-request.  Otherwise an error shall be emitted (see below).
    *
    * @tparam Task_err
    *         See other async_accept() overload.
@@ -427,7 +486,7 @@ public:
    * @param mdt_load_func
    *        See `Mdt_load_func`.
    * @param on_done_func
-   *        See other async_accept() overload.  Note the above target (pointer) args are touched
+   *        See other async_accept() overload.  Note the above out-args, other than `target_session`, are touched
    *        only if falsy #Error_code is passed to this handler.
    */
   template<typename Task_err,
@@ -439,6 +498,43 @@ public:
                     N_init_channels_by_srv_req_func&& n_init_channels_by_srv_req_func,
                     Mdt_load_func&& mdt_load_func,
                     Task_err&& on_done_func);
+
+  /**
+   * Generated if and only if `S_MQS_ENABLED`, this is the last-specified user override for the max MQ message size
+   * for the `Channel`s of `Session`s spawned from `*this` session-server.  Each `Session` uses the value as of its
+   * async_accept() call, for all its `Channel`s.
+   *
+   * If zero: we will choose a reasonable value (1) depending on whether we are SHM-enabled and (2) based on the
+   * assumption that the `Channel`s shall be each upgraded-to a SHM-enabled struc::Channel.
+   *   - Re. (1): A `*this` is not SHM-enabled.  However if you're reading this doc header due to being sent here
+   *     from a SHM-enabled Session_server (e.g., shm::classic::Session_server::mq_msg_size_limit()), then of course
+   *     the converse is the case.
+   *   - Re. (2): Basically the interesting situation is, specifically, if `*this` is SHM-enabled.  The assumption (2),
+   *     if it is *in fact* true, will correctly cause little MQ messages to be used internally; big ones are not
+   *     needed, if you're using a SHM-enabled struc::Channel (only little SHM handles are being transmitted).
+   *     However it is entirely plausible you might use a heap-backed struc::Channel with a SHM-enabled `Session`
+   *     (perhaps you want to transmit SHM-handles manually yourself -- maybe to SHM-stored STL structures, say);
+   *     or you have no desire to use struc::Channel *at all* (but, again, you're using SHM-backing for native,
+   *     maybe STL data).  So in that case, the chosen default MQ max message size is too small for whatever payloads
+   *     you've got.  Then a non-zero mq_msg_size_limit() would be useful or required.
+   *
+   * If not zero: we will use this value (possibly somewhat adjusted based on alignment or similar technicalities).
+   *
+   * @return See above.
+   */
+  size_t mq_msg_size_limit() const;
+
+  /**
+   * Generated if and only if `S_MQS_ENABLED`, this sets the value returned by eponymous accessor.  It affects
+   * `Session`s from subsequent async_accept() calls; existing ones (and those being accepted) keep their value.
+   *
+   * ### Thread safety ###
+   * It is not safe to call it concurrently with the accessor, the mutator, or async_accept().
+   *
+   * @param limit
+   *        See accessor overload; it explains the meaning of this value.  Note zero is a special value.
+   */
+  void mq_msg_size_limit(size_t limit);
 
   /**
    * Prints string representation to the given `ostream`.
@@ -459,23 +555,28 @@ public:
 
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define TEMPLATE_SESSION_SERVER \
-  template<schema::MqType S_MQ_TYPE_OR_NONE, bool S_TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
+  template<schema::MqType MQ_TYPE_OR_NONE, bool TRANSMIT_NATIVE_HANDLES, typename Mdt_payload>
 /// Internally used macro; public API users should disregard (same deal as in struc/channel.hpp).
 #define CLASS_SESSION_SERVER \
-  Session_server<S_MQ_TYPE_OR_NONE, S_TRANSMIT_NATIVE_HANDLES, Mdt_payload>
+  Session_server<MQ_TYPE_OR_NONE, TRANSMIT_NATIVE_HANDLES, Mdt_payload>
 
 TEMPLATE_SESSION_SERVER
 CLASS_SESSION_SERVER::Session_server(flow::log::Logger* logger_ptr, const Server_app& srv_app_ref_arg,
                                      const Client_app::Master_set& cli_app_master_set_ref,
                                      Error_code* err_code) :
   Impl(logger_ptr, this, srv_app_ref_arg, cli_app_master_set_ref, err_code,
-       [](const Client_app&) -> Error_code { return Error_code(); }) // Impl customization point: unused.
+       [](const Client_app&) -> Error_code { return {}; }) // Impl customization point: unused.
 {
   // OK then.
 }
 
 TEMPLATE_SESSION_SERVER
-CLASS_SESSION_SERVER::~Session_server() = default; // It's declared at all just to document it.  Forward to base.
+CLASS_SESSION_SERVER::~Session_server()
+{
+  /* We have no state of our own for in-flight async_accept()s to reach, so the base dtor would do this just as
+   * well; but by contract (see Session_server_impl::dtor_stop_accepting()) the terminal sub-class calls it. */
+  Impl::dtor_stop_accepting();
+}
 
 TEMPLATE_SESSION_SERVER
 template<typename Task_err>
@@ -490,7 +591,7 @@ void CLASS_SESSION_SERVER::async_accept(Server_session_obj* target_session, Task
                std::move(on_done_func));
 
   /* @todo shm::classic::Session_server::async_accept() counterpart is a copy-paste of the above.
-   * shm::arena_lend::jemalloc::Session_erver::async_accept() is too.
+   * shm::arena_lend::jemalloc::Session_server::async_accept() is too.
    * Maybe the design can be amended for greater code reuse/maintainability?  This isn't *too* bad but....
    *
    * Anyway, for now, if you change this then change the aforementioned forwarding code in the other
@@ -510,6 +611,18 @@ void CLASS_SESSION_SERVER::async_accept(Server_session_obj* target_session,
 {
   Impl::async_accept(target_session, init_channels_by_srv_req, mdt_from_cli_or_null, init_channels_by_cli_req,
                      std::move(n_init_channels_by_srv_req_func), std::move(mdt_load_func), std::move(on_done_func));
+}
+
+TEMPLATE_SESSION_SERVER
+size_t CLASS_SESSION_SERVER::mq_msg_size_limit() const
+{
+  return Impl::mq_msg_size_limit();
+}
+
+TEMPLATE_SESSION_SERVER
+void CLASS_SESSION_SERVER::mq_msg_size_limit(size_t limit)
+{
+  Impl::mq_msg_size_limit(limit);
 }
 
 TEMPLATE_SESSION_SERVER

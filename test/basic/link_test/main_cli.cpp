@@ -44,9 +44,9 @@ int main(int argc, char const * const * argv)
     // Please see main_srv.cpp.  We're just the other side of that.  Keeping comments light.
 
     ipc::session::Client_session<ipc::session::schema::MqType::NONE, false>
-      session(&(*log_logger),
+      session{&(*log_logger),
               CLI_APPS.find(CLI_NAME)->second,
-              SRV_APPS.find(SRV_NAME)->second, [](auto&&...) {});
+              SRV_APPS.find(SRV_NAME)->second, [](auto&&...) {}};
 
     FLOW_LOG_INFO("Session-client attempting to open session against session-server; "
                   "it'll either succeed or fail very soon; and at that point we will exit.");

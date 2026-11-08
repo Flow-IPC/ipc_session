@@ -41,7 +41,7 @@ endif()
 # Mirror above find_package() calls.  As directed omit "REQUIRED."
 set(DEP_LIBS_PKG_ARG_LISTS "IpcTransportStructured ${DEP_IPC_TRANSPORT_STRUCTURED_VERSION} CONFIG")
 
-# (See above if wondering why we're not auto-searching for these.  There's a good reason.)
+# (See comment in FlowLikeLib.cmake if wondering why we're not auto-searching for these.  There's a good reason.)
 # Ideally keep this in `find -s` order.
 set(SRCS
     ipc/session/app.cpp
@@ -60,11 +60,14 @@ set(HDRS
     ipc/session/detail/session_fwd.hpp
     ipc/session/detail/session_server_impl.hpp
     ipc/session/detail/session_shared_name.hpp
+    ipc/session/detail/info_collector_dtl.hpp
     ipc/session/error.hpp
     ipc/session/server_session.hpp
     ipc/session/session.hpp
+    ipc/session/session_cfg.hpp
     ipc/session/session_fwd.hpp
     ipc/session/session_server.hpp
+    ipc/session/info_collector.hpp
     ipc/session/sync_io/client_session_adapter.hpp
     ipc/session/sync_io/detail/session_adapter.hpp
     ipc/session/sync_io/server_session_adapter.hpp

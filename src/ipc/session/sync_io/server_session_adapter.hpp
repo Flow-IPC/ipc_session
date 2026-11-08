@@ -44,18 +44,19 @@ namespace ipc::session::sync_io
  * @see Session_server_adapter which prepares useful objects of this type.
  * @see session::Server_session_mv, session::Server_session, et al.
  *
- * As is generally the case when choosing `sync_io::X` versus `X`, we recommend using `X` due to it being easier.
- * In this particular case (see below) there is no perf benefit to using `sync_io::X`, either, so the only reason
- * to use `sync_io::X` in this case would be because you've got an old-school reactor event loop with
- * a `poll()` or `epoll_wait()`, in which case the `sync_io` API may be easier to integrate.
+ * In this particular case (see below) `sync_io::X` is internally built on `X`, so it does not avoid background
+ * threads and offers no perf benefit.  So the reason to use `sync_io::X` here would be that you've got an
+ * old-school reactor event loop with a `poll()` or `epoll_wait()`, in which case the `sync_io` API may be easier
+ * to integrate.  Otherwise `X` does the same job with a smaller API.
  *
  * To use it:
  *   - Determine the type of your desired Session_server_adapter.  For example, if you deal with
- *     sessions of type `session::shm::classic::Session<knobs>`, then use
+ *     sessions of type `session::shm::classic::Server_session<knobs>`, then use
  *     `S = Session_server_adapter<session::shm::classic::Session_server<knobs>>`.
  *   - From this obtain the desired type of `*this`: `using T = S::Session_obj`.
  *   - Construct a blank `T t` (via default ctor) -- a/k/a `*this`.
- *   - Use `S::async_accept(&t)`, targeting `*this`.  On success `*this` is ready to use, in almost-PEER state.
+ *   - Use `s.async_accept(&t, ...)` (where `s` is an `S`), targeting `*this`.  On success `*this` is ready to use,
+ *     in almost-PEER state.
  *   - Set up `sync_io` pattern using start_ops() (and if needed precede it with replace_event_wait_handles()).
  *   - Call init_handlers(), analogously to async-I/O Server_session_mv::init_handlers().  As with an async-I/O
  *     `Server_session` you will need to provide:
@@ -74,7 +75,7 @@ namespace ipc::session::sync_io
  * @tparam Session
  *         The async-I/O `Server_session` concrete type being adapted.  As of this writing that would be one of
  *         at least: `session::Server_session<knobs>`, `session::shm::classic::Server_session<knobs>`,
- *         `session::shm::jemalloc::Server_session<knobs>`.  We would recommend the technique shown in the
+ *         `session::shm::arena_lend::jemalloc::Server_session<knobs>`.  We would recommend the technique shown in the
  *         above doc header involving Session_server_adapter::Session_obj.  This will enable nice code reuse and
  *         be conducive to generic programming.
  */
@@ -178,7 +179,7 @@ template<typename Event_wait_func_t>
 bool Server_session_adapter<Session>::start_ops(Event_wait_func_t&& ev_wait_func)
 {
   return Base::start_ops(std::move(ev_wait_func));
-} // Session_adapter::start_ops()
+} // Server_session_adapter::start_ops()
 
 template<typename Session>
 template<typename Create_ev_wait_hndl_func>

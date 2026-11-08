@@ -21,6 +21,8 @@
 #include "ipc/session/error.hpp"
 #include "ipc/util/native_handle.hpp"
 #include <flow/error/error.hpp>
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 namespace ipc::session
@@ -34,7 +36,6 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
   using util::Native_handle;
   using boost::system::system_category;
   using ::open;
-  using ::close;
   // using ::O_PATH; // It's a macro apparently.
   // using ::errno; // It's a macro apparently.
 
@@ -53,17 +54,21 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
    * though we'll have to open a handle temporarily.  I've seen boost.interprocess do it fairly casually for
    * similar purposes, so why not.  The O_PATH flag (which opens the resource just for this purpose -- not for
    * I/O) is perfect for it, particularly since the resource might not be a file but a SHM pool, etc. */
+#ifndef FLOW_OS_LINUX
+  static_assert(false, "O_PATH is a Linux extension (also in some BSDs); when porting consider O_RDONLY at the cost "
+                         "of requiring read permission -- see util::set_resource_permissions() -- or fs::status().");
+#endif
 
   int native_handle = open(path.c_str(), O_PATH);
   if (native_handle == -1)
   {
-    *err_code = Error_code(errno, system_category());
+    *err_code = {errno, system_category()};
     FLOW_LOG_WARNING("Tried to check ownership of resource at [" << path << "] but while obtaining info-only handle "
                      "encountered error [" << *err_code << "] [" << err_code->message() << "]; unable to check.");
     return;
   }
   // else
-  Native_handle handle(native_handle);
+  Native_handle handle{native_handle};
 
   // For nicer messaging add some more logging on error.  A little code duplication, but it's OK.
   ensure_resource_owner_is_app(logger_ptr, handle, app, err_code);
@@ -74,7 +79,7 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, const fs::path&
                      "unexpected ownership; see preceding WARNING referencing all other details.");
   }
 
-  close(native_handle);
+  handle.close();
 } // ensure_resource_owner_is_app(1)
 
 void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_handle handle, const App& app,
@@ -105,15 +110,16 @@ void ensure_resource_owner_is_app(flow::log::Logger* logger_ptr, util::Native_ha
   const auto rc = fstat(handle.m_native_handle, &stats);
   if (rc == -1)
   {
-    *err_code = Error_code(errno, system_category());
+    *err_code = {errno, system_category()};
     FLOW_LOG_WARNING("Tried to check ownership via descriptor/handle [" << handle << "] but encountered "
                      "error [" << *err_code << "] [" << err_code->message() << "]; unable to check.");
   }
   else if ((stats.st_uid != app.m_user_id) || (stats.st_gid != app.m_group_id))
   {
     *err_code = error::Code::S_RESOURCE_OWNER_UNEXPECTED;
-    FLOW_LOG_WARNING("Checked ownership via descriptor/handle [" << handle << "] but encountered "
-                     "error [" << *err_code << "] [" << err_code->message() << "]; unable to check.");
+    FLOW_LOG_WARNING("Checked ownership via descriptor/handle [" << handle << "]: owner UID:GID "
+                     "[" << stats.st_uid << ':' << stats.st_gid << "] does not match App [" << app << "]; "
+                     "emitting error [" << *err_code << "] [" << err_code->message() << "].");
   }
   else
   {
