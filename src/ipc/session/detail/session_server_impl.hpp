@@ -848,8 +848,16 @@ CLASS_SESSION_SERVER_IMPL::Session_server_impl
     // else
     throw Runtime_error{our_err_code, FLOW_UTIL_WHERE_AM_I_STR()};
   }
-  /* Got here: CNS (PID file) written fine.  Now we can listen on the socket stream acceptor derived off that value:
-   * clients will read that file and thus know to connect to that. */
+  /* Got here: CNS (PID file) written fine.  Now we listen on the socket stream acceptor derived off that value:
+   * clients will read that file and thus know to connect to that.
+   *
+   * (@todo We could in fact listen before writing the file instead; this would arguably (during this short time
+   * window here) involve a bit less entropy, in that the client wouldn't have a window where it sees the new PID
+   * but can't connect.  Then again, an *old* CNS (PID file) stays around even after its Session_server goes down,
+   * and it would be normal for a Client_session connect attempt to see the CNS, attempt socket connect, and fail;
+   * so the new-CNS case isn't really that different (plus, again, it's unlikely due to timing).  Still: it would
+   * be one fewer scenario which is probably good, though low-priority.  Just remember to destroy the acceptor,
+   * if there's a problem writing CNS.) */
 
   // This might throw; or emit failure to *err_code; or neither (success).
   m_state->m_master_sock_acceptor
